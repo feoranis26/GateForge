@@ -1,0 +1,54 @@
+version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[[package]]
+name = "gateforge"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "pyosys" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pybind11-stubgen" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pyosys", specifier = "==0.68" }]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pybind11-stubgen", specifier = ">=2.5.5" }]
+
+[[package]]
+name = "pybind11-stubgen"
+version = "2.5.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/81/81900180501a51056572dd01aa852cc2d162478d4676ecebbfaad5cc20d1/pybind11_stubgen-2.5.5.tar.gz", hash = "sha256:758d6d6bbeefc62ad7f78d5e5bbf357ccf6af83cd4504f5f549403f452942708", size = 25031, upload-time = "2025-08-09T01:22:44.403Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4f/e4/4f2d41881fae547f06ffa4c9748fa8ed13c4db5c830ff268b84175546b3c/pybind11_stubgen-2.5.5-py3-none-any.whl", hash = "sha256:10824cd2fc5cbbee032b8fb39e6f6c08de232deb309bc66d786a6c6e8a4601bd", size = 30210, upload-time = "2025-08-09T01:22:43.135Z" },
+]
+
+[[package]]
+name = "pyosys"
+version = "0.68"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/05/8e/fa03ad82bbcf5f5a8a3c61908ae4687b08428c13ac824f6986ed698b929d/pyosys-0.68-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:398ae93492fc9b795f59a9a40fb404ff33c4c99bcf70e381f99670eff0baa717", size = 21718236, upload-time = "2026-08-05T08:46:07.284Z" },
+    { url = "https://files.pythonhosted.org/packages/31/04/8a10fc127fa23c60047b82088de1c4215245f0be00e439a31994416266b5/pyosys-0.68-cp312-cp312-macosx_11_0_x86_64.whl", hash = "sha256:3aa7e9764425a5149729c14cce2d6fc1c21a4ce2602bf8e2dafcf084808e2562", size = 24548819, upload-time = "2026-08-05T08:46:09.542Z" },
+    { url = "https://files.pythonhosted.org/packages/99/3d/f3a1ae931223e1cfeb88588ef3ce00473cafd82e69f86de007c398f51cf1/pyosys-0.68-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6c00f14905a6122e190e5df06f54a87dd8a0702366f45a5b6c9f774f928ee9f4", size = 27176680, upload-time = "2026-08-05T08:46:11.894Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/b1/cf8c6a91b19fa16c027f8aa220934160c5cff0cf3df10042791eaedd30fc/pyosys-0.68-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dd56f7c0c5fcfd4c2fac270480dd555dc9a0501764200cf05e67e0aec807e003", size = 29274772, upload-time = "2026-08-05T08:46:14.501Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/5e/04c90ec96fb721949925abb9db610c549b0a6b768ac9099ecb9059f18d6a/pyosys-0.68-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:cfb2a549b010e6d73fd03389b2b8ec743d808262b2116eb22cb08ddb3ce6b367", size = 21721318, upload-time = "2026-08-05T08:46:16.9Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/34/eb43df13977afbef77a26d5d4bffd407ef4f9bd20d8a3a69e69f909d714f/pyosys-0.68-cp313-cp313-macosx_11_0_x86_64.whl", hash = "sha256:bc02ea158f9f97c9b9a0c52442362d75aa520034c1f80bae9794227583f48676", size = 24550099, upload-time = "2026-08-05T08:46:19.338Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/f6/96518ad5163138cabff69454471559927235eb054c8a871a9f8af7b60274/pyosys-0.68-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b48b0b227e6495c96d5b368268b359c224770dd70295fdc68ad44d298a6ab939", size = 27178968, upload-time = "2026-08-05T08:46:21.853Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/57/4f4cf7ae2e5f36bcabf71187a0110a6ba7796bf673d880e3036e83ec8c3f/pyosys-0.68-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:67221e5bf953f25db1255e71530274d844fa05a275072b147dda9888223fddf3", size = 29275725, upload-time = "2026-08-05T08:46:24.807Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/62/62982c725bdbcd22f34766f89950aa1bfa6ed1bbe0b668dc70dcbcc5b689/pyosys-0.68-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:bc46ba0f69c0c84c59cfc53e58ffaafa7ecd70ba453bb15645cf7111923e7f63", size = 21721351, upload-time = "2026-08-05T08:46:27.203Z" },
+    { url = "https://files.pythonhosted.org/packages/75/17/9ebe6596fd80835753b22a0c859229fdde14203c394852ffa06c0c90ae59/pyosys-0.68-cp314-cp314-macosx_11_0_x86_64.whl", hash = "sha256:a8de5f132978288e6bd58491bbc32be27d06301e32f33b6ce53448678b4a43bb", size = 24550883, upload-time = "2026-08-05T08:46:29.496Z" },
+    { url = "https://files.pythonhosted.org/packages/67/19/893031927933741636c49974d215b5b2c776f6ba3df92227e1ec55c4aef8/pyosys-0.68-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f1a5a3e7cec848823d2409183a2a2cbc46fa2197e9b18b45656d2df7f9effa43", size = 27179085, upload-time = "2026-08-05T08:46:31.807Z" },
+    { url = "https://files.pythonhosted.org/packages/80/23/02df01663d7e604feb9684697b7ee43c6f4b18b07e3711131354771942c4/pyosys-0.68-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1a969b5dd25cade4ed2b178313046c041c7463dbb32d24864dc20fe438392f1d", size = 29275883, upload-time = "2026-08-05T08:46:34.285Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/d5/7de2a9a40cad1f4749c551db2fbe50e2299da08ef85db97f15d5db57e5fd/pyosys-0.68-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:df4148c552ccfedb4e45b981fe72f8c987f57493b01c01d5be2582fc54d84051", size = 21726982, upload-time = "2026-08-05T08:46:36.925Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/e3/30da8093dcd3cef35527490fae04208bbc2e4e8625c1b20294044a73a646/pyosys-0.68-cp314-cp314t-macosx_11_0_x86_64.whl", hash = "sha256:222eaa5644abd9d670ce5ee475bdf451c4d6917b7a532778d4fb8a54ab0029e9", size = 24555406, upload-time = "2026-08-05T08:46:39.766Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/0a/c8feea11a21d8dec3779d831c7d15b08d430ba619c9a8cc8444912f3550d/pyosys-0.68-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:68823fb79692da77dba6a0f63f7fab4807cf8a533f0e492de0e51d55d52049b9", size = 27223935, upload-time = "2026-08-05T08:46:42.413Z" },
+    { url = "https://files.pythonhosted.org/packages/88/d2/38c5f6e41adfaf3948c8609e098d3bccfbdd7372f66d51c84e26c48444fa/pyosys-0.68-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2369491e277956388cb7d907d7f5300eb72101106c39cddd7b586cb451a107f8", size = 29321751, upload-time = "2026-08-05T08:46:45.062Z" },
+]

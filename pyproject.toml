@@ -1,0 +1,21 @@
+[project]
+name = "gateforge"
+version = "0.1.0"
+description = "A staged Verilog compiler for unconventional construction fabrics"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyosys==0.68",
+]
+
+[project.scripts]
+gateforge = "gateforge:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pybind11-stubgen>=2.5.5",
+]
