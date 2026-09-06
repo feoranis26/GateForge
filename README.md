@@ -51,6 +51,25 @@ uv run gateforge place build/material.json \
 Without `--output`, `place` writes placement JSON to stdout and status messages
 to stderr.
 
+Export a placed LBP design as Craftworld Toolkit-compatible PLAN JSON:
+
+```sh
+uv run gateforge export lbp-toolkit \
+	build/material.json \
+	build/placement.json \
+	--output build/object.json
+```
+
+The exporter validates that the material and placement digests match, realizes
+LBP gates and wires, adds non-inverting NOT gates as temporary module I/O
+buffers, and uses batteries for binary constants. Use `--title`,
+`--description`, and `--creator` to override inventory metadata.
+
+Treat Big Profile mutation as an offline operation: fully exit LBP, back up the
+profile, import and save the generated PLAN with Craftworld Toolkit, and then
+restart the game. Repacking a profile while LBP is running can leave its cached
+resource state inconsistent until restart.
+
 ## Placement Model
 
 Material nets remain provider-neutral hyperedges. A target provider projects

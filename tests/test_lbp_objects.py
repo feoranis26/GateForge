@@ -17,6 +17,7 @@ from gateforge.providers.lbp.types import (
     LBPGateType,
     LBPNotGateType,
     LBPOrGateType,
+    LBPXorGateType,
     decode_lbp_object_type,
 )
 from gateforge.target import (
@@ -92,12 +93,14 @@ class LBPObjectTypeTests(unittest.TestCase):
         self.assertEqual(LBPAndGateType.TYPE_KEY, "AND")
         self.assertEqual(LBPOrGateType.TYPE_KEY, "OR")
         self.assertEqual(LBPNotGateType.TYPE_KEY, "NOT")
+        self.assertEqual(LBPXorGateType.TYPE_KEY, "XOR")
 
     def test_all_leaf_identifiers_round_trip_exactly(self) -> None:
         cases = (
             (LBPAndGateType, "AND"),
             (LBPOrGateType, "OR"),
             (LBPNotGateType, "NOT"),
+            (LBPXorGateType, "XOR"),
         )
         for gate_class, key in cases:
             for invert in (False, True):
@@ -125,7 +128,6 @@ class LBPObjectTypeTests(unittest.TestCase):
             "GATE(invert=false):VARIABLE_WIDTH(width=0):AND",
             "GATE(invert=false):VARIABLE_WIDTH(width=02):AND",
             "GATE(invert=false):VARIABLE_WIDTH(width=two):AND",
-            "GATE(invert=false):VARIABLE_WIDTH(width=2):XOR",
             "GATE(invert=false):VARIABLE_WIDTH(width=2):AND(extra=x)",
             "GATE(invert=false):VARIABLE_WIDTH(width=2):AND:EXTRA",
             "GATE(invert=%66alse):VARIABLE_WIDTH(width=2):AND",

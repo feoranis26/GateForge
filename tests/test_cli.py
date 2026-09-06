@@ -79,6 +79,81 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 2)
 
+    def test_lbp_toolkit_export_uses_paired_artifacts(self) -> None:
+        output = Path(self.directory.name) / "export" / "object.json"
+        stdout = StringIO()
+        with redirect_stdout(stdout), redirect_stderr(StringIO()):
+            main(
+                [
+                    "export",
+                    "lbp-toolkit",
+                    str(self.material_path),
+                    str(self.one_shot_path),
+                    "--output",
+                    str(output),
+                ]
+            )
+
+        value = json.loads(output.read_text())
+        root = value["resource"]["things"][0]
+        details = value["resource"]["inventoryData"]["userCreatedDetails"]
+        self.assertEqual(value["revision"], 35128313)
+        self.assertEqual(root["PSwitch"]["type"], "MICROCHIP")
+        self.assertEqual(details["name"], "test")
+        self.assertIn("7 material objects", details["description"])
+        self.assertIn("Exported 7 material gadgets", stdout.getvalue())
+
+    def test_lbp_toolkit_export_applies_metadata_overrides_deterministically(self) -> None:
+        first = Path(self.directory.name) / "first-object.json"
+        second = Path(self.directory.name) / "second-object.json"
+        arguments = [
+            "export",
+            "lbp-toolkit",
+            str(self.material_path),
+            str(self.one_shot_path),
+            "--title",
+            "Custom Title",
+            "--description",
+            "Custom Description",
+            "--creator",
+            "Custom Creator",
+        ]
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            main([*arguments, "--output", str(first)])
+            main([*arguments, "--output", str(second)])
+
+        value = json.loads(first.read_text())
+        inventory = value["resource"]["inventoryData"]
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        self.assertEqual(inventory["userCreatedDetails"]["name"], "Custom Title")
+        self.assertEqual(
+            inventory["userCreatedDetails"]["description"],
+            "Custom Description",
+        )
+        self.assertEqual(inventory["creator"], "Custom Creator")
+
+    def test_lbp_toolkit_export_rejects_digest_mismatch_before_writing(self) -> None:
+        placement = json.loads(self.one_shot_path.read_text())
+        placement["material_digest"] = "f" * 64
+        mismatched = Path(self.directory.name) / "mismatched.json"
+        mismatched.write_text(json.dumps(placement))
+        output = Path(self.directory.name) / "must-not-exist.json"
+
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as raised:
+            main(
+                [
+                    "export",
+                    "lbp-toolkit",
+                    str(self.material_path),
+                    str(mismatched),
+                    "--output",
+                    str(output),
+                ]
+            )
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertFalse(output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

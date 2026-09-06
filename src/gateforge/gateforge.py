@@ -22,6 +22,8 @@ from gateforge.provider import TargetProvider
 from gateforge.providers.lbp.common import LBP_PROVIDER
 from gateforge.providers.lbp.mappers import LBPCombinatorialLowLevelGateMapper
 from gateforge.providers.lbp.objects import make_lbp_provider
+from gateforge.providers.lbp.realize import realize_lbp_plan
+from gateforge.providers.lbp.toolkit import encode_lbp_toolkit_plan
 from gateforge.source import DesignSnapshot
 from gateforge.state import CompilationIntermediateState
 
@@ -241,6 +243,38 @@ def _place_command(args: argparse.Namespace) -> None:
     )
 
 
+def _export_lbp_toolkit_command(args: argparse.Namespace) -> None:
+    providers = _target_providers()
+    material = MaterialDesign.from_canonical_data(
+        _load_json(args.material),
+        providers,
+    )
+    graph = MaterialGraph.from_design(material, providers)
+    placed = PlacedDesign.from_canonical_data(
+        _load_json(args.placement),
+        graph,
+    )
+    plan = realize_lbp_plan(
+        material,
+        graph,
+        placed,
+        title=args.title,
+        description=args.description,
+        creator=args.creator,
+    )
+    _write_json(args.output, encode_lbp_toolkit_plan(plan))
+    material_gadgets = sum(
+        item.source.value == "material_object" for item in plan.gadgets
+    )
+    io_gadgets = sum(item.source.value == "module_port" for item in plan.gadgets)
+    batteries = sum(item.source.value == "constant" for item in plan.gadgets)
+    print(
+        f"Exported {material_gadgets} material gadgets, {io_gadgets} I/O buffers, "
+        f"{batteries} batteries, and {len(plan.connections)} connections on a "
+        f"{plan.board_size.x:g} x {plan.board_size.y:g} circuit board."
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Compile synthesizable Verilog for a GateForge target."
@@ -296,13 +330,45 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     _add_placement_arguments(place_parser)
 
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Export paired material and placement artifacts.",
+    )
+    export_subparsers = export_parser.add_subparsers(
+        dest="export_format",
+        required=True,
+    )
+    toolkit_parser = export_subparsers.add_parser(
+        "lbp-toolkit",
+        help="Write Craftworld Toolkit-compatible LBP PLAN JSON.",
+    )
+    toolkit_parser.add_argument("material", type=Path)
+    toolkit_parser.add_argument("placement", type=Path)
+    toolkit_parser.add_argument("--output", type=Path, required=True)
+    toolkit_parser.add_argument(
+        "--title",
+        help="Override the saved object's inventory title.",
+    )
+    toolkit_parser.add_argument(
+        "--description",
+        help="Override the saved object's inventory description.",
+    )
+    toolkit_parser.add_argument(
+        "--creator",
+        help="Override creator and creation-history metadata.",
+    )
+
     args = parser.parse_args(argv)
 
     try:
         if args.command == "compile":
             _compile_command(args)
-        else:
+        elif args.command == "place":
             _place_command(args)
+        elif args.command == "export" and args.export_format == "lbp-toolkit":
+            _export_lbp_toolkit_command(args)
+        else:
+            raise ValueError(f"Unknown export format {args.export_format!r}")
     except (OSError, RuntimeError, ValueError) as error:
         parser.exit(1, f"gateforge: error: {error}\n")
 
