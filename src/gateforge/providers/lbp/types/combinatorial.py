@@ -120,3 +120,7 @@ class LBPOrGateType(_LBPVariableWidthLeaf):
 @LBP_COMBINATORIAL_TYPES.register
 class LBPNotGateType(_LBPVariableWidthLeaf):
     TYPE_KEY = "NOT"
+
+@LBP_COMBINATORIAL_TYPES.register
+class LBPXorGateType(_LBPVariableWidthLeaf):
+    TYPE_KEY = "XOR"

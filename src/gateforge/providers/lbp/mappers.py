@@ -8,6 +8,8 @@ from gateforge.providers.lbp.types import (
     LBPAndGateType,
     LBPNotGateType,
     LBPOrGateType,
+    LBPXorGateType,
+    LBPCombinatorialVariableWidthGateType,
 )
 from gateforge.source import (
     CellPortIdentifier,
@@ -51,6 +53,8 @@ class LBPCombinatorialLowLevelGateMapper(MappingProvider):
             "$_NOR_",
             "$_NOT_",
             "$_BUF_",
+            "$_XOR_",
+            "$_XNOR_",
         }
     )
 
@@ -76,7 +80,7 @@ class LBPCombinatorialLowLevelGateMapper(MappingProvider):
 
     def _single_gate_prefab(
         self,
-        gate_type: LBPAndGateType | LBPOrGateType | LBPNotGateType,
+        gate_type: LBPCombinatorialVariableWidthGateType,
         port_bindings: tuple[tuple[str, str, PortDirection], ...],
     ) -> SemanticPrefab:
         return SemanticPrefab(
@@ -182,6 +186,14 @@ class LBPCombinatorialLowLevelGateMapper(MappingProvider):
         if cell_type == "$_BUF_":
             return self._single_gate_prefab(
                 LBPNotGateType(width=1, invert=True), _UNARY_PORT_BINDINGS
+            )
+        if cell_type == "$_XOR_":
+            return self._single_gate_prefab(
+                LBPXorGateType(width=2, invert=False), _BINARY_PORT_BINDINGS
+            )
+        if cell_type == "$_XNOR_":
+            return self._single_gate_prefab(
+                LBPXorGateType(width=2, invert=True), _BINARY_PORT_BINDINGS
             )
         return None
 

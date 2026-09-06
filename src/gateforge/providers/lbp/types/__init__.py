@@ -5,6 +5,7 @@ from gateforge.providers.lbp.types.combinatorial import (
     LBPCombinatorialVariableWidthGateType,
     LBPNotGateType,
     LBPOrGateType,
+    LBPXorGateType,
 )
 from gateforge.target import ObjectTypeIdentifier, PrefabValidationError
 from gateforge.type_codec import (
@@ -39,5 +40,6 @@ __all__ = [
     "LBPGateType",
     "LBPNotGateType",
     "LBPOrGateType",
+    "LBPXorGateType",
     "decode_lbp_object_type",
 ]
