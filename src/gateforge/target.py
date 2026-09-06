@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
 import json
-from typing import Callable, Iterable
+import math
+from typing import Iterable
 
 
 PREFAB_SCHEMA_VERSION = 1
@@ -13,6 +14,82 @@ PREFAB_SCHEMA_VERSION = 1
 
 class PrefabValidationError(ValueError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderConfiguration:
+    canonical_json: str = "{}"
+
+    def __post_init__(self) -> None:
+        try:
+            value = json.loads(
+                self.canonical_json,
+                parse_constant=lambda token: (_ for _ in ()).throw(
+                    ValueError(f"Invalid JSON number {token}")
+                ),
+            )
+        except (json.JSONDecodeError, ValueError) as error:
+            raise ValueError("Provider configuration must be valid JSON") from error
+        normalized = _normalize_provider_json(value, "provider configuration")
+        if not isinstance(normalized, dict):
+            raise ValueError("Provider configuration must be an object")
+        object.__setattr__(
+            self,
+            "canonical_json",
+            json.dumps(
+                normalized,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
+        )
+
+    @classmethod
+    def from_canonical_data(cls, value: object) -> "ProviderConfiguration":
+        normalized = _normalize_provider_json(value, "provider configuration")
+        if not isinstance(normalized, dict):
+            raise ValueError("Provider configuration must be an object")
+        return cls(
+            json.dumps(
+                normalized,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+
+    @property
+    def is_empty(self) -> bool:
+        return self.canonical_json == "{}"
+
+    def canonical_data(self) -> dict[str, object]:
+        value = json.loads(self.canonical_json)
+        if not isinstance(value, dict):
+            raise AssertionError("Canonical provider configuration is not an object")
+        return value
+
+
+def _normalize_provider_json(value: object, context: str) -> object:
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{context} contains a non-finite number")
+        return value
+    if isinstance(value, list):
+        return [
+            _normalize_provider_json(item, f"{context} array") for item in value
+        ]
+    if isinstance(value, Mapping):
+        normalized: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{context} object keys must be strings")
+            normalized[key] = _normalize_provider_json(item, f"{context}.{key}")
+        return normalized
+    raise ValueError(f"{context} contains unsupported value {value!r}")
 
 
 class PortDirection(StrEnum):
@@ -97,41 +174,10 @@ class TargetTypeRegistry:
 
 
 @dataclass(frozen=True, slots=True)
-class TargetProvider:
-    identifier: str
-    registry: TargetTypeRegistry
-    validator: Callable[["SemanticPrefab", TargetTypeRegistry], None]
-    physical_validator: Callable[
-        [PhysicalNet, Mapping[PhysicalObjectId, PhysicalObject], TargetTypeRegistry],
-        None,
-    ] | None = None
-
-    def validate(self, prefab: "SemanticPrefab") -> None:
-        if prefab.provider != self.identifier:
-            raise PrefabValidationError(
-                f"Provider {self.identifier!r} cannot validate "
-                f"{prefab.provider!r} prefab"
-            )
-        self.validator(prefab, self.registry)
-
-    def validate_physical_net(
-        self,
-        net: PhysicalNet,
-        objects: Mapping[PhysicalObjectId, PhysicalObject],
-    ) -> None:
-        if net.type.provider != self.identifier:
-            raise PrefabValidationError(
-                f"Provider {self.identifier!r} cannot validate physical network "
-                f"from {net.type.provider!r}"
-            )
-        if self.physical_validator is not None:
-            self.physical_validator(net, objects, self.registry)
-
-
-@dataclass(frozen=True, slots=True)
 class PrefabObject:
     role: str
     type: ObjectTypeIdentifier
+    configuration: ProviderConfiguration = ProviderConfiguration()
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,112 +214,6 @@ class PrefabNet:
 @dataclass(frozen=True, slots=True, order=True)
 class PrefabId:
     value: str
-
-
-@dataclass(frozen=True, slots=True, order=True)
-class OccurrenceId:
-    value: str
-
-
-@dataclass(frozen=True, slots=True, order=True)
-class PhysicalObjectId:
-    value: str
-
-
-@dataclass(frozen=True, slots=True)
-class PhysicalObject:
-    identifier: PhysicalObjectId
-    occurrence: OccurrenceId
-    prefab: PrefabId
-    role: str
-    type: ObjectTypeIdentifier
-    hierarchy: str
-
-
-@dataclass(frozen=True, slots=True)
-class PhysicalObjectPortRef:
-    object: PhysicalObjectId
-    port: str
-    bit: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class PhysicalModulePortRef:
-    module: str
-    port: str
-    bit: int
-    direction: PortDirection
-
-
-@dataclass(frozen=True, slots=True)
-class PhysicalConstantRef:
-    value: str
-
-
-type PhysicalAttachment = (
-    PhysicalObjectPortRef | PhysicalModulePortRef | PhysicalConstantRef
-)
-
-
-@dataclass(frozen=True, slots=True)
-class PhysicalNet:
-    identifier: str
-    type: NetworkTypeIdentifier
-    attachments: frozenset[PhysicalAttachment]
-
-
-@dataclass(frozen=True, slots=True)
-class PhysicalDesign:
-    objects: tuple[PhysicalObject, ...]
-    nets: tuple[PhysicalNet, ...]
-
-    def canonical_data(self) -> dict[str, object]:
-        return {
-            "schema_version": 1,
-            "objects": [
-                {
-                    "id": item.identifier.value,
-                    "occurrence": item.occurrence.value,
-                    "prefab": item.prefab.value,
-                    "role": item.role,
-                    "type": _type_data(item.type),
-                    "hierarchy": item.hierarchy,
-                }
-                for item in self.objects
-            ],
-            "nets": [
-                {
-                    "id": net.identifier,
-                    "type": _type_data(net.type),
-                    "attachments": sorted(
-                        (_physical_attachment_data(item) for item in net.attachments),
-                        key=lambda item: json.dumps(item, sort_keys=True),
-                    ),
-                }
-                for net in self.nets
-            ],
-        }
-
-
-def _physical_attachment_data(
-    attachment: PhysicalAttachment,
-) -> dict[str, object]:
-    if isinstance(attachment, PhysicalObjectPortRef):
-        return {
-            "kind": "object",
-            "object": attachment.object.value,
-            "port": attachment.port,
-            "bit": attachment.bit,
-        }
-    if isinstance(attachment, PhysicalModulePortRef):
-        return {
-            "kind": "module_port",
-            "module": attachment.module,
-            "port": attachment.port,
-            "bit": attachment.bit,
-            "direction": attachment.direction.value,
-        }
-    return {"kind": "constant", "value": attachment.value}
 
 
 def _type_data(
@@ -372,7 +312,7 @@ class SemanticPrefab:
             "schema_version": PREFAB_SCHEMA_VERSION,
             "provider": self.provider,
             "objects": [
-                {"role": item.role, "type": _type_data(item.type)}
+                _prefab_object_data(item)
                 for item in sorted(self.objects, key=lambda item: item.role)
             ],
             "ports": [
@@ -420,6 +360,13 @@ class SemanticPrefab:
             PrefabObject(
                 role=_require_str(item.get("role"), "object role"),
                 type=_decode_object_type(item.get("type")),
+                configuration=(
+                    ProviderConfiguration.from_canonical_data(
+                        item.get("configuration")
+                    )
+                    if "configuration" in item
+                    else ProviderConfiguration()
+                ),
             )
             for raw_item in _require_list(data.get("objects"), "prefab objects")
             for item in [_require_mapping(raw_item, "prefab object")]
@@ -487,6 +434,16 @@ class SemanticPrefab:
             ports=ports,
             nets=frozenset(nets),
         )
+
+
+def _prefab_object_data(item: PrefabObject) -> dict[str, object]:
+    data: dict[str, object] = {
+        "role": item.role,
+        "type": _type_data(item.type),
+    }
+    if not item.configuration.is_empty:
+        data["configuration"] = item.configuration.canonical_data()
+    return data
 
 
 def _unique_by_name(items: Iterable[object], attribute: str, kind: str) -> dict[str, object]:

@@ -7,6 +7,7 @@ from pyosys import libyosys as ys
 
 from gateforge.design import DesignContext, rtlil_id
 from gateforge.mapping import BoundaryBinding, MappingProposal
+from gateforge.provider import TargetProvider
 from gateforge.source import (
     ConstantBoundarySource,
     DesignSnapshot,
@@ -25,7 +26,6 @@ from gateforge.target import (
     PrefabPort,
     PrefabPortRef,
     SemanticPrefab,
-    TargetProvider,
 )
 
 

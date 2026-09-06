@@ -1,26 +1,30 @@
 from collections import defaultdict
 from collections.abc import Hashable, Mapping
-import hashlib
 import json
 
 from gateforge.design import DesignContext, rtlil_id
+from gateforge.material import (
+    MaterialAttachment,
+    MaterialConstantRef,
+    MaterialDesign,
+    MaterialModulePortRef,
+    MaterialNet,
+    MaterialObject,
+    MaterialObjectId,
+    MaterialObjectPortRef,
+    OccurrenceId,
+    make_material_net_id,
+    make_material_object_id,
+    make_occurrence_id,
+)
+from gateforge.provider import TargetProvider
 from gateforge.source import ConstantBit, ModulePortIdentifier, SnapshotBitRef
 from gateforge.state import ClaimDefinitionId, CompilationIntermediateState
 from gateforge.target import (
     NetworkTypeIdentifier,
     ObjectPortRef,
-    OccurrenceId,
-    PhysicalAttachment,
-    PhysicalConstantRef,
-    PhysicalDesign,
-    PhysicalModulePortRef,
-    PhysicalNet,
-    PhysicalObject,
-    PhysicalObjectId,
-    PhysicalObjectPortRef,
     PortDirection,
     PrefabPortRef,
-    TargetProvider,
 )
 
 
@@ -49,91 +53,11 @@ class _DisjointSet:
             self._parents[second_root] = first_root
 
 
-def _digest(data: object) -> str:
-    encoded = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _occurrence_id(
-    module: str,
-    cell_name: str | None,
-    hierarchy: str,
-    claim: ClaimDefinitionId,
-) -> OccurrenceId:
-    return OccurrenceId(
-        _digest(
-            {
-                "schema_version": 1,
-                "module": module,
-                "hierarchy": hierarchy,
-                "claim": claim.value,
-                **({"cell": cell_name} if cell_name is not None else {}),
-            }
-        )
-    )
-
-
-def _physical_object_id(
-    occurrence: OccurrenceId,
-    prefab: str,
-    role: str,
-) -> PhysicalObjectId:
-    return PhysicalObjectId(
-        _digest(
-            {
-                "schema_version": 1,
-                "occurrence": occurrence.value,
-                "prefab": prefab,
-                "role": role,
-            }
-        )
-    )
-
-
-def _attachment_data(attachment: PhysicalAttachment) -> dict[str, object]:
-    if isinstance(attachment, PhysicalObjectPortRef):
-        return {
-            "kind": "object",
-            "object": attachment.object.value,
-            "port": attachment.port,
-            "bit": attachment.bit,
-        }
-    if isinstance(attachment, PhysicalModulePortRef):
-        return {
-            "kind": "module_port",
-            "module": attachment.module,
-            "port": attachment.port,
-            "bit": attachment.bit,
-            "direction": attachment.direction.value,
-        }
-    return {"kind": "constant", "value": attachment.value}
-
-
-def _physical_net_id(
-    network_type: NetworkTypeIdentifier,
-    attachments: frozenset[PhysicalAttachment],
-) -> str:
-    return _digest(
-        {
-            "schema_version": 1,
-            "network_type": {
-                "provider": network_type.provider,
-                "name": network_type.name,
-                "version": network_type.version,
-            },
-            "attachments": sorted(
-                (_attachment_data(item) for item in attachments),
-                key=lambda item: json.dumps(item, sort_keys=True),
-            ),
-        }
-    )
-
-
 def materialize(
     context: DesignContext,
     state: CompilationIntermediateState,
     providers: Mapping[str, TargetProvider],
-) -> PhysicalDesign:
+) -> MaterialDesign:
     if state.revision != context.revision:
         raise MaterializationError(
             f"State revision {state.revision} does not match design revision "
@@ -141,10 +65,10 @@ def materialize(
         )
     snapshot = context.snapshot()
     disjoint = _DisjointSet()
-    objects: dict[PhysicalObjectId, PhysicalObject] = {}
+    objects: dict[MaterialObjectId, MaterialObject] = {}
     local_types: dict[tuple[OccurrenceId, str], NetworkTypeIdentifier] = {}
     local_attachments: dict[
-        tuple[OccurrenceId, str], set[PhysicalAttachment]
+        tuple[OccurrenceId, str], set[MaterialAttachment]
     ] = defaultdict(set)
     external_to_local: dict[
         tuple[OccurrenceId, PrefabPortRef], tuple[OccurrenceId, str]
@@ -153,7 +77,7 @@ def materialize(
         SnapshotBitRef, list[tuple[OccurrenceId, str]]
     ] = defaultdict(list)
     local_constants: dict[
-        tuple[OccurrenceId, str], set[PhysicalConstantRef]
+        tuple[OccurrenceId, str], set[MaterialConstantRef]
     ] = defaultdict(set)
 
     for module in snapshot.modules.values():
@@ -211,27 +135,28 @@ def materialize(
             else:
                 hierarchy = cell.attributes.get("hdlname", cell.identifier.name)
                 identity_cell_name = cell.identifier.name
-            occurrence = _occurrence_id(
+            occurrence = make_occurrence_id(
                 module.name,
                 identity_cell_name,
                 hierarchy,
-                claim_id,
+                claim_id.value,
             )
-            role_to_object: dict[str, PhysicalObjectId] = {}
+            role_to_object: dict[str, MaterialObjectId] = {}
             for prefab_object in prefab.objects:
-                identifier = _physical_object_id(
+                identifier = make_material_object_id(
                     occurrence,
-                    claim.prefab.value,
+                    claim.prefab,
                     prefab_object.role,
                 )
                 role_to_object[prefab_object.role] = identifier
-                objects[identifier] = PhysicalObject(
+                objects[identifier] = MaterialObject(
                     identifier=identifier,
                     occurrence=occurrence,
                     prefab=claim.prefab,
                     role=prefab_object.role,
                     type=prefab_object.type,
                     hierarchy=hierarchy,
+                    configuration=prefab_object.configuration,
                 )
 
             for prefab_net in prefab.nets:
@@ -241,7 +166,7 @@ def materialize(
                 for attachment in prefab_net.attachments:
                     if isinstance(attachment, ObjectPortRef):
                         local_attachments[local_key].add(
-                            PhysicalObjectPortRef(
+                            MaterialObjectPortRef(
                                 object=role_to_object[attachment.object_role],
                                 port=attachment.port,
                                 bit=attachment.bit,
@@ -274,7 +199,7 @@ def materialize(
                     signal_to_local[source].append(local_key)
                 elif isinstance(source, ConstantBit):
                     local_constants[local_key].add(
-                        PhysicalConstantRef(source.value.value)
+                        MaterialConstantRef(source.value.value)
                     )
 
     for local_keys in signal_to_local.values():
@@ -290,14 +215,14 @@ def materialize(
         signal: disjoint.find(keys[0])
         for signal, keys in signal_to_local.items()
     }
-    root_module_ports: dict[Hashable, set[PhysicalModulePortRef]] = defaultdict(set)
+    root_module_ports: dict[Hashable, set[MaterialModulePortRef]] = defaultdict(set)
     for signal, root in signal_roots.items():
         module = snapshot.module(signal.module)
         for endpoint in module.endpoints.get(signal, frozenset()):
             if isinstance(endpoint, ModulePortIdentifier):
                 port = module.ports[endpoint.name]
                 root_module_ports[root].add(
-                    PhysicalModulePortRef(
+                    MaterialModulePortRef(
                         module=endpoint.module,
                         port=endpoint.name,
                         bit=endpoint.bit,
@@ -305,51 +230,51 @@ def materialize(
                     )
                 )
 
-    physical_nets: list[PhysicalNet] = []
+    material_nets: list[MaterialNet] = []
     for root, local_keys in grouped_keys.items():
         network_types = {local_types[key] for key in local_keys}
         if len(network_types) != 1:
             raise MaterializationError(
-                f"Physical network joins incompatible types {network_types!r}"
+                f"Material network joins incompatible types {network_types!r}"
             )
         network_type = next(iter(network_types))
-        attachments: set[PhysicalAttachment] = set(root_module_ports[root])
+        attachments: set[MaterialAttachment] = set(root_module_ports[root])
         for local_key in local_keys:
             attachments.update(local_attachments[local_key])
             attachments.update(local_constants[local_key])
         frozen_attachments = frozenset(attachments)
-        physical_nets.append(
-            PhysicalNet(
-                identifier=_physical_net_id(network_type, frozen_attachments),
+        material_nets.append(
+            MaterialNet(
+                identifier=make_material_net_id(network_type, frozen_attachments),
                 type=network_type,
                 attachments=frozen_attachments,
             )
         )
 
-    physical = PhysicalDesign(
+    material = MaterialDesign(
         objects=tuple(sorted(objects.values(), key=lambda item: item.identifier.value)),
-        nets=tuple(sorted(physical_nets, key=lambda item: item.identifier)),
+        nets=tuple(sorted(material_nets, key=lambda item: item.identifier.value)),
     )
-    objects_by_id = {item.identifier: item for item in physical.objects}
-    for net in physical.nets:
+    objects_by_id = {item.identifier: item for item in material.objects}
+    for net in material.nets:
         try:
             provider = providers[net.type.provider]
         except KeyError as error:
             raise MaterializationError(
-                f"No provider is registered for physical network {net.type}"
+                f"No provider is registered for material network {net.type}"
             ) from error
         try:
-            provider.validate_physical_net(net, objects_by_id)
+            provider.validate_material_net(net, objects_by_id)
         except ValueError as error:
             raise MaterializationError(str(error)) from error
-    return physical
+    return material
 
 
 def flatten_and_materialize(
     context: DesignContext,
     state: CompilationIntermediateState,
     providers: Mapping[str, TargetProvider],
-) -> tuple[CompilationIntermediateState, PhysicalDesign]:
+) -> tuple[CompilationIntermediateState, MaterialDesign]:
     context.run_pass("uniquify")
     state = state.with_revision(context.revision)
     snapshot = context.snapshot()

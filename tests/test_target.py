@@ -14,6 +14,7 @@ from gateforge.target import (
     PrefabPort,
     PrefabPortRef,
     PrefabValidationError,
+    ProviderConfiguration,
     SemanticPrefab,
     SignalTypeIdentifier,
     TargetTypeRegistry,
@@ -104,6 +105,37 @@ def _andnot_prefab(reverse: bool = False) -> SemanticPrefab:
 
 
 class SemanticPrefabTests(unittest.TestCase):
+    def test_provider_configuration_is_canonical_and_affects_prefab_id(self) -> None:
+        configuration = ProviderConfiguration.from_canonical_data(
+            {"right": [2, 3], "left": 1}
+        )
+        configured = replace(
+            _andnot_prefab(),
+            objects=frozenset(
+                replace(item, configuration=configuration)
+                if item.role == "result"
+                else item
+                for item in _andnot_prefab().objects
+            ),
+        )
+
+        self.assertEqual(
+            configuration.canonical_json,
+            '{"left":1,"right":[2,3]}',
+        )
+        self.assertNotEqual(configured.get_id(), _andnot_prefab().get_id())
+        self.assertEqual(
+            SemanticPrefab.from_canonical_data(configured.canonical_data()),
+            configured,
+        )
+
+    def test_empty_provider_configuration_does_not_change_canonical_data(self) -> None:
+        prefab = _andnot_prefab()
+
+        self.assertTrue(
+            all("configuration" not in item for item in prefab.canonical_data()["objects"])
+        )
+
     def test_prefab_id_is_independent_of_construction_order(self) -> None:
         first = _andnot_prefab()
         second = _andnot_prefab(reverse=True)

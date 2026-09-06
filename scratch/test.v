@@ -9,19 +9,19 @@ endmodule
 module test (
     output reg a,
     output reg b,
-    output reg c,
+    output wire c,
     output reg [5:0] garbage,
     input wire goto_a,
     input wire goto_b,
     input wire goto_c,
     input wire clk,
     input wire reset,
-);
+);j
 
     reg [1:0] cur_state;
     reg [1:0] next_state;
 
-    wire c_i;
+    reg c_i;
 
     myinverter invert_c (c, c_i);
 

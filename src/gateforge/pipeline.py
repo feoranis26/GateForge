@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from gateforge.claims import accept_mapping_proposals
 from gateforge.design import DesignContext
 from gateforge.mapping import Mapper
+from gateforge.provider import TargetProvider
 from gateforge.state import CompilationIntermediateState
-from gateforge.target import TargetProvider
 
 
 @dataclass(frozen=True, slots=True)

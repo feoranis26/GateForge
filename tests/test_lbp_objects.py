@@ -28,12 +28,61 @@ from gateforge.target import (
     PrefabPort,
     PrefabPortRef,
     PrefabValidationError,
+    ProviderConfiguration,
     SemanticPrefab,
     validate_prefab,
 )
 
 
 class LBPObjectTypeTests(unittest.TestCase):
+    def test_lbp_provider_rejects_nonempty_object_configuration(self) -> None:
+        prefab = self._single_configured_prefab()
+
+        from gateforge.providers.lbp.objects import make_lbp_provider
+
+        with self.assertRaises(PrefabValidationError):
+            make_lbp_provider().validate(prefab)
+
+    @staticmethod
+    def _single_configured_prefab() -> SemanticPrefab:
+        not_type = LBPNotGateType(width=1, invert=False).get_type()
+        return SemanticPrefab(
+            provider=LBP_PROVIDER,
+            objects=frozenset(
+                {
+                    PrefabObject(
+                        "gate",
+                        not_type,
+                        ProviderConfiguration.from_canonical_data({"mode": "x"}),
+                    )
+                }
+            ),
+            ports=frozenset(
+                {
+                    PrefabPort("A", PortDirection.INPUT, LBP_LOGIC),
+                    PrefabPort("Y", PortDirection.OUTPUT, LBP_LOGIC),
+                }
+            ),
+            nets=frozenset(
+                {
+                    PrefabNet(
+                        "a",
+                        LBP_WIRE,
+                        frozenset(
+                            {PrefabPortRef("A"), ObjectPortRef("gate", "IN_0")}
+                        ),
+                    ),
+                    PrefabNet(
+                        "y",
+                        LBP_WIRE,
+                        frozenset(
+                            {ObjectPortRef("gate", "OUT"), PrefabPortRef("Y")}
+                        ),
+                    ),
+                }
+            ),
+        )
+
     def test_hierarchy_owns_the_canonical_type_keys(self) -> None:
         self.assertEqual(LBPGateType.TYPE_KEY, "GATE")
         self.assertEqual(

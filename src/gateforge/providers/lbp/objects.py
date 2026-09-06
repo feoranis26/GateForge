@@ -1,22 +1,24 @@
 from collections.abc import Mapping
 
+from gateforge.material import (
+    MaterialConstantRef,
+    MaterialModulePortRef,
+    MaterialNet,
+    MaterialObject,
+    MaterialObjectId,
+    MaterialObjectPortRef,
+)
+from gateforge.provider import ProjectedDependency, TargetProvider
 from gateforge.providers.lbp.common import LBP_LOGIC, LBP_PROVIDER, LBP_WIRE
 from gateforge.providers.lbp.types import decode_lbp_object_type
 from gateforge.target import (
     NetworkTypeSchema,
     ObjectTypeIdentifier,
     ObjectTypeSchema,
-    PhysicalConstantRef,
-    PhysicalModulePortRef,
-    PhysicalNet,
-    PhysicalObject,
-    PhysicalObjectId,
-    PhysicalObjectPortRef,
     PortDirection,
     PrefabPortRef,
     PrefabValidationError,
     SemanticPrefab,
-    TargetProvider,
     TargetTypeRegistry,
     attachment_direction,
     validate_prefab,
@@ -61,41 +63,74 @@ def validate_lbp_prefab(
             )
 
 
-def validate_lbp_physical_net(
-    net: PhysicalNet,
-    objects: Mapping[PhysicalObjectId, PhysicalObject],
+def validate_lbp_material_net(
+    net: MaterialNet,
+    objects: Mapping[MaterialObjectId, MaterialObject],
     registry: TargetTypeRegistry,
 ) -> None:
-    producers = 0
-    for attachment in net.attachments:
-        if isinstance(attachment, PhysicalConstantRef):
-            producers += 1
-        elif isinstance(attachment, PhysicalModulePortRef):
-            if attachment.direction in {PortDirection.INPUT, PortDirection.INOUT}:
-                producers += 1
-        elif isinstance(attachment, PhysicalObjectPortRef):
-            try:
-                physical_object = objects[attachment.object]
-            except KeyError as error:
-                raise PrefabValidationError(
-                    f"Physical network references unknown object {attachment.object}"
-                ) from error
-            schema = registry.object(physical_object.type)
-            port = next(
-                (item for item in schema.ports if item.name == attachment.port),
-                None,
-            )
-            if port is None or attachment.bit < 0 or attachment.bit >= port.width:
-                raise PrefabValidationError(
-                    f"Physical network references invalid object port {attachment}"
-                )
-            if port.direction in {PortDirection.OUTPUT, PortDirection.INOUT}:
-                producers += 1
+    producers = sum(
+        _is_lbp_source(attachment, objects, registry)
+        for attachment in net.attachments
+    )
     if producers != 1:
         raise PrefabValidationError(
-            f"LBP physical network {net.identifier!r} requires exactly one "
+            f"LBP material network {net.identifier!r} requires exactly one "
             f"producer, got {producers}"
         )
+
+
+def project_lbp_material_dependencies(
+    net: MaterialNet,
+    objects: Mapping[MaterialObjectId, MaterialObject],
+    registry: TargetTypeRegistry,
+) -> tuple[ProjectedDependency, ...]:
+    sources = [
+        attachment
+        for attachment in net.attachments
+        if _is_lbp_source(attachment, objects, registry)
+    ]
+    if len(sources) != 1:
+        raise PrefabValidationError(
+            f"LBP material network {net.identifier!r} requires exactly one "
+            f"producer, got {len(sources)}"
+        )
+    source = sources[0]
+    return tuple(
+        ProjectedDependency(source, attachment)
+        for attachment in net.attachments
+        if attachment != source
+    )
+
+
+def _is_lbp_source(
+    attachment: MaterialConstantRef
+    | MaterialModulePortRef
+    | MaterialObjectPortRef,
+    objects: Mapping[MaterialObjectId, MaterialObject],
+    registry: TargetTypeRegistry,
+) -> bool:
+    if isinstance(attachment, MaterialConstantRef):
+        return True
+    if isinstance(attachment, MaterialModulePortRef):
+        if attachment.direction == PortDirection.INOUT:
+            raise PrefabValidationError("LBP does not support INOUT material ports")
+        return attachment.direction == PortDirection.INPUT
+
+    try:
+        material_object = objects[attachment.object]
+    except KeyError as error:
+        raise PrefabValidationError(
+            f"Material network references unknown object {attachment.object}"
+        ) from error
+    schema = registry.object(material_object.type)
+    port = next((item for item in schema.ports if item.name == attachment.port), None)
+    if port is None or attachment.bit < 0 or attachment.bit >= port.width:
+        raise PrefabValidationError(
+            f"Material network references invalid object port {attachment}"
+        )
+    if port.direction == PortDirection.INOUT:
+        raise PrefabValidationError("LBP does not support INOUT material object ports")
+    return port.direction == PortDirection.OUTPUT
 
 
 def make_lbp_provider() -> TargetProvider:
@@ -103,5 +138,6 @@ def make_lbp_provider() -> TargetProvider:
         identifier=LBP_PROVIDER,
         registry=LBPTypeRegistry(),
         validator=validate_lbp_prefab,
-        physical_validator=validate_lbp_physical_net,
+        material_validator=validate_lbp_material_net,
+        dependency_projector=project_lbp_material_dependencies,
     )
