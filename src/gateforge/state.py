@@ -1,5 +1,7 @@
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+import hashlib
+import json
 from types import MappingProxyType
 from typing import Any
 
@@ -139,6 +141,17 @@ class CompilationIntermediateState:
                 )
             ],
         }
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            self.canonical_data(),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+
+    def get_digest(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
     @classmethod
     def from_canonical_data(

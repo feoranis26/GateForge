@@ -1,4 +1,5 @@
 import argparse
+from dataclasses import replace
 import json
 import os
 from collections.abc import Mapping, Sequence
@@ -9,6 +10,13 @@ import tempfile
 from pyosys import libyosys as ys
 from gateforge.design import DesignContext, export_json
 from gateforge.graph import MaterialGraph
+from gateforge.hierarchy import (
+    PhysicalHierarchyMode,
+    PhysicalHierarchyPolicy,
+    SynthesisHierarchyMode,
+    SynthesisHierarchyPolicy,
+    apply_synthesis_hierarchy,
+)
 from gateforge.material import MaterialDesign
 from gateforge.mapping import Mapper, MappingProvider
 from gateforge.materialize import flatten_and_materialize
@@ -17,19 +25,34 @@ from gateforge.placement import (
     TopologicalPlacementOptions,
     TopologicalPlacer,
 )
-from gateforge.pipeline import MappingStage, default_mapping_stages, run_mapping_stages
+from gateforge.pipeline import MappingStage, default_mapping_stages
 from gateforge.provider import TargetProvider
 from gateforge.providers.lbp.common import LBP_PROVIDER
+from gateforge.providers.lbp.hierarchy import containerize_lbp_plan
+from gateforge.providers.lbp.associative import LBPAssociativeConeMapper
+from gateforge.providers.lbp.intrinsics import LBPIntrinsicMapper
 from gateforge.providers.lbp.mappers import LBPCombinatorialLowLevelGateMapper
 from gateforge.providers.lbp.objects import make_lbp_provider
 from gateforge.providers.lbp.realize import realize_lbp_plan
 from gateforge.providers.lbp.toolkit import encode_lbp_toolkit_plan
+from gateforge.search import (
+    CompilationSearch,
+    MappingSearchMode,
+    MappingSearchOptions,
+    MappingSearchReport,
+    MappingSearchResult,
+    TerminalCandidateScore,
+)
 from gateforge.source import DesignSnapshot
 from gateforge.state import CompilationIntermediateState
 
 
 def design_preprocess(path: str) -> DesignContext:
     context = DesignContext(ys.Design())
+    intrinsic_library = Path(__file__).parent / "intrinsics" / "gateforge_intrinsics.v"
+    context.run_pass(
+        f"read_verilog -lib {json.dumps(str(intrinsic_library.resolve()))}"
+    )
     context.run_pass(f"read_verilog {json.dumps(os.path.abspath(path))}")
     context.run_pass("hierarchy -check -auto-top")
     context.run_pass("proc")
@@ -65,24 +88,50 @@ def compile_source(
     stages: Sequence[MappingStage] | None = None,
     mapping_providers: Sequence[MappingProvider] | None = None,
     target_providers: Mapping[str, TargetProvider] | None = None,
+    synthesis_hierarchy: SynthesisHierarchyPolicy = SynthesisHierarchyPolicy(),
+    mapping_search: MappingSearchOptions = MappingSearchOptions(
+        mode=MappingSearchMode.GREEDY
+    ),
 ) -> tuple[DesignContext, CompilationIntermediateState]:
-    context = design_preprocess(path)
-    state = CompilationIntermediateState.empty(context.revision)
     if stages is None:
         stages = default_mapping_stages()
     if mapping_providers is None:
-        mapping_providers = (LBPCombinatorialLowLevelGateMapper(),)
+        mapping_providers = (
+            LBPIntrinsicMapper(),
+            LBPAssociativeConeMapper(),
+            LBPCombinatorialLowLevelGateMapper(),
+        )
     if target_providers is None:
         target_providers = {LBP_PROVIDER: make_lbp_provider()}
 
-    state = run_mapping_stages(
-        context,
-        state,
+    result = _search_source(
+        path,
         stages,
+        mapping_providers,
+        target_providers,
+        synthesis_hierarchy,
+        mapping_search,
+    )
+    winner = result.candidates[0]
+    return winner.restore_context(), winner.state
+
+
+def _search_source(
+    path: str,
+    stages: Sequence[MappingStage],
+    mapping_providers: Sequence[MappingProvider],
+    target_providers: Mapping[str, TargetProvider],
+    synthesis_hierarchy: SynthesisHierarchyPolicy,
+    mapping_search: MappingSearchOptions,
+) -> MappingSearchResult:
+    context = design_preprocess(path)
+    apply_synthesis_hierarchy(context, synthesis_hierarchy)
+    state = CompilationIntermediateState.empty(context.revision)
+    return CompilationSearch(
         Mapper(mapping_providers),
         target_providers,
-    )
-    return context, state
+        mapping_search,
+    ).run(context, state, stages)
 
 
 def compile_material(
@@ -91,29 +140,123 @@ def compile_material(
     stages: Sequence[MappingStage] | None = None,
     mapping_providers: Sequence[MappingProvider] | None = None,
     target_providers: Mapping[str, TargetProvider] | None = None,
+    synthesis_hierarchy: SynthesisHierarchyPolicy = SynthesisHierarchyPolicy(),
+    mapping_search: MappingSearchOptions = MappingSearchOptions(
+        mode=MappingSearchMode.GREEDY
+    ),
 ) -> tuple[DesignContext, CompilationIntermediateState, MaterialDesign]:
-    if target_providers is None:
-        target_providers = {LBP_PROVIDER: make_lbp_provider()}
-    context, state = compile_source(
+    context, state, material, _ = compile_material_with_report(
         path,
         stages=stages,
         mapping_providers=mapping_providers,
         target_providers=target_providers,
+        synthesis_hierarchy=synthesis_hierarchy,
+        mapping_search=mapping_search,
     )
-    residual = unmapped_cells(context.snapshot())
-    if residual:
-        details = ", ".join(
-            f"{module}.{name} ({cell_type})"
-            for module, name, cell_type in residual
-        )
-        raise RuntimeError(f"Design contains unmapped cells: {details}")
-    state, material = flatten_and_materialize(
-        context,
-        state,
-        target_providers,
-    )
-
     return context, state, material
+
+
+def compile_material_with_report(
+    path: str,
+    *,
+    stages: Sequence[MappingStage] | None = None,
+    mapping_providers: Sequence[MappingProvider] | None = None,
+    target_providers: Mapping[str, TargetProvider] | None = None,
+    synthesis_hierarchy: SynthesisHierarchyPolicy = SynthesisHierarchyPolicy(),
+    mapping_search: MappingSearchOptions = MappingSearchOptions(
+        mode=MappingSearchMode.GREEDY
+    ),
+) -> tuple[
+    DesignContext,
+    CompilationIntermediateState,
+    MaterialDesign,
+    MappingSearchReport,
+]:
+    if stages is None:
+        stages = default_mapping_stages()
+    if mapping_providers is None:
+        mapping_providers = (
+            LBPIntrinsicMapper(),
+            LBPAssociativeConeMapper(),
+            LBPCombinatorialLowLevelGateMapper(),
+        )
+    if target_providers is None:
+        target_providers = {LBP_PROVIDER: make_lbp_provider()}
+    result = _search_source(
+        path,
+        stages,
+        mapping_providers,
+        target_providers,
+        synthesis_hierarchy,
+        mapping_search,
+    )
+    evaluated: list[
+        tuple[
+            tuple[float, int, str, str],
+            DesignContext,
+            CompilationIntermediateState,
+            MaterialDesign,
+            TerminalCandidateScore,
+        ]
+    ] = []
+    residual_details: list[str] = []
+    for candidate in result.candidates:
+        context = candidate.restore_context()
+        residual = unmapped_cells(context.snapshot())
+        if residual:
+            residual_details.extend(
+                f"{module}.{name} ({cell_type})"
+                for module, name, cell_type in residual
+            )
+            continue
+        state, material = flatten_and_materialize(
+            context,
+            candidate.state,
+            target_providers,
+        )
+        object_cost = sum(
+            target_providers[item.type.provider].material_object_cost(item)
+            for item in material.objects
+        )
+        terminal_score = TerminalCandidateScore(
+            candidate=candidate.identifier,
+            material_digest=material.get_digest().value,
+            provider_object_cost=object_cost,
+            object_count=len(material.objects),
+            decisions=candidate.decisions,
+        )
+        evaluated.append(
+            (
+                (
+                    object_cost,
+                    len(material.objects),
+                    material.get_digest().value,
+                    candidate.identifier.value,
+                ),
+                context,
+                state,
+                material,
+                terminal_score,
+            )
+        )
+    if not evaluated:
+        details = ", ".join(sorted(set(residual_details)))
+        raise RuntimeError(f"Design contains unmapped cells: {details}")
+    _, context, state, material, winner_score = min(
+        evaluated,
+        key=lambda item: item[0],
+    )
+    report = replace(
+        result.report,
+        terminal_scores=tuple(
+            sorted(
+                (item[4] for item in evaluated),
+                key=lambda item: item.candidate.value,
+            )
+        ),
+        winner=winner_score.candidate,
+    )
+    return context, state, material, report
 
 
 def _target_providers() -> dict[str, TargetProvider]:
@@ -130,14 +273,26 @@ def _add_placement_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--column-pitch",
         type=float,
-        default=262.5,
+        default=210.0,
         help="Horizontal spacing between topological columns.",
     )
     parser.add_argument(
         "--row-pitch",
         type=float,
-        default=262.5,
+        default=105.0,
         help="Vertical spacing between subjects in a column.",
+    )
+    parser.add_argument(
+        "--routing-group-size",
+        type=int,
+        default=5,
+        help="Number of content rows between aligned wire-routing gaps.",
+    )
+    parser.add_argument(
+        "--routing-gap-rows",
+        type=int,
+        default=1,
+        help="Number of empty rows reserved for each wire-routing gap.",
     )
 
 
@@ -153,7 +308,10 @@ def _place(
         TopologicalPlacementOptions(
             column_pitch=args.column_pitch,
             row_pitch=args.row_pitch,
-        )
+            routing_group_size=args.routing_group_size,
+            routing_gap_rows=args.routing_gap_rows,
+        ),
+        providers=providers,
     )
     return placer.place(graph).finalize(graph)
 
@@ -189,10 +347,19 @@ def _compile_command(args: argparse.Namespace) -> None:
     if args.emit_placement is not None and args.emit_material is None:
         raise ValueError("--emit-placement requires --emit-material")
     providers = _target_providers()
-    context, state, material = compile_material(
+    context, state, material, search_report = compile_material_with_report(
         args.source,
         stages=default_mapping_stages(use_abc=not args.no_abc),
         target_providers=providers,
+        synthesis_hierarchy=SynthesisHierarchyPolicy(
+            SynthesisHierarchyMode(args.synthesis_hierarchy),
+            args.synthesis_threshold,
+        ),
+        mapping_search=MappingSearchOptions(
+            mode=MappingSearchMode(args.mapping_search),
+            beam_width=args.mapping_beam_width,
+            stage_alternative_limit=args.mapping_stage_limit,
+        ),
     )
     placed = (
         _place(material, providers, args)
@@ -207,6 +374,8 @@ def _compile_command(args: argparse.Namespace) -> None:
         _write_json(args.emit_material, material.canonical_data())
     if args.emit_state is not None:
         _write_json(args.emit_state, state.canonical_data())
+    if args.emit_search_report is not None:
+        _write_json(args.emit_search_report, search_report.canonical_data())
     if args.emit_placement is not None and placed is not None:
         _write_json(args.emit_placement, placed.canonical_data())
     print(
@@ -262,6 +431,17 @@ def _export_lbp_toolkit_command(args: argparse.Namespace) -> None:
         description=args.description,
         creator=args.creator,
     )
+    plan = containerize_lbp_plan(
+        plan,
+        material,
+        graph,
+        placed,
+        PhysicalHierarchyPolicy(
+            PhysicalHierarchyMode(args.physical_hierarchy),
+            args.hierarchy_threshold,
+        ),
+        providers,
+    )
     _write_json(args.output, encode_lbp_toolkit_plan(plan))
     material_gadgets = sum(
         item.source.value == "material_object" for item in plan.gadgets
@@ -270,7 +450,8 @@ def _export_lbp_toolkit_command(args: argparse.Namespace) -> None:
     batteries = sum(item.source.value == "constant" for item in plan.gadgets)
     print(
         f"Exported {material_gadgets} material gadgets, {io_gadgets} I/O buffers, "
-        f"{batteries} batteries, and {len(plan.connections)} connections on a "
+        f"{batteries} batteries, {len(plan.notes)} notes, and "
+        f"{len(plan.connections)} connections on a "
         f"{plan.board_size.x:g} x {plan.board_size.y:g} circuit board."
     )
 
@@ -307,14 +488,48 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Write semantic prefabs and durable claim definitions as JSON.",
     )
     compile_parser.add_argument(
+        "--emit-search-report",
+        type=Path,
+        help="Write mapping decisions, candidate counts, and terminal scores as JSON.",
+    )
+    compile_parser.add_argument(
         "--no-abc",
         action="store_true",
         help="Skip ABC optimization before the final leaf mapping stage.",
     )
     compile_parser.add_argument(
+        "--mapping-search",
+        choices=tuple(item.value for item in MappingSearchMode),
+        default=MappingSearchMode.GREEDY.value,
+        help="Choose greedy compatibility, beam, or exhaustive mapping search.",
+    )
+    compile_parser.add_argument(
+        "--mapping-beam-width",
+        type=int,
+        default=16,
+        help="Maximum candidates retained after each beam-search stage.",
+    )
+    compile_parser.add_argument(
+        "--mapping-stage-limit",
+        type=int,
+        default=16,
+        help="Maximum proposal sets generated per candidate and stage.",
+    )
+    compile_parser.add_argument(
         "--show",
         action="store_true",
         help="Open the final Yosys graph visualization.",
+    )
+    compile_parser.add_argument(
+        "--synthesis-hierarchy",
+        choices=tuple(item.value for item in SynthesisHierarchyMode),
+        default=SynthesisHierarchyMode.PRESERVE.value,
+        help="Choose module flattening before mapping and optimization.",
+    )
+    compile_parser.add_argument(
+        "--synthesis-threshold",
+        type=int,
+        help="Primitive-cell threshold used by --synthesis-hierarchy=min-cells.",
     )
     _add_placement_arguments(compile_parser)
 
@@ -356,6 +571,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     toolkit_parser.add_argument(
         "--creator",
         help="Override creator and creation-history metadata.",
+    )
+    toolkit_parser.add_argument(
+        "--physical-hierarchy",
+        choices=tuple(item.value for item in PhysicalHierarchyMode),
+        default=PhysicalHierarchyMode.FLAT.value,
+        help="Choose which HDL module occurrences become nested microchips.",
+    )
+    toolkit_parser.add_argument(
+        "--hierarchy-threshold",
+        type=float,
+        help="Threshold used by min-objects or min-cost physical hierarchy.",
     )
 
     args = parser.parse_args(argv)

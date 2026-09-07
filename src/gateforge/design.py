@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -16,6 +20,50 @@ from gateforge.source import (
 
 class DesignError(ValueError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class DesignCheckpoint:
+    rtlil: str
+    revision: int
+    scratchpad: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.revision, int) or isinstance(self.revision, bool):
+            raise TypeError("Design checkpoint revision must be an integer")
+        if self.revision < 0:
+            raise ValueError("Design checkpoint revision must be nonnegative")
+        if tuple(sorted(self.scratchpad)) != self.scratchpad:
+            raise ValueError("Design checkpoint scratchpad must be sorted")
+        if len(dict(self.scratchpad)) != len(self.scratchpad):
+            raise ValueError("Design checkpoint scratchpad contains duplicate keys")
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            {
+                "revision": self.revision,
+                "rtlil": self.rtlil,
+                "scratchpad": [list(item) for item in self.scratchpad],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def get_digest(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    def restore(self) -> DesignContext:
+        with TemporaryDirectory(prefix="gateforge-checkpoint-") as directory:
+            input_path = Path(directory) / "design.il"
+            input_path.write_text(self.rtlil, encoding="utf-8")
+            design = ys.Design()
+            ys.run_pass(f"read_rtlil {json.dumps(str(input_path))}", design)
+        for key, value in self.scratchpad:
+            design.scratchpad_set_string(key, value)
+        if not design.full_selection():
+            design.push_full_selection()
+        design.check()
+        return DesignContext(design, revision=self.revision)
 
 
 def rtlil_id(name: str) -> ys.IdString:
@@ -44,6 +92,18 @@ class DesignContext:
                 revision=self.revision,
             )
         return self._snapshot
+
+    def checkpoint(self) -> DesignCheckpoint:
+        self.design.check()
+        self.design.sort()
+        return DesignCheckpoint(
+            rtlil=self.design.to_rtlil_str(only_selected=False),
+            revision=self.revision,
+            scratchpad=tuple(sorted(self.design.scratchpad.items())),
+        )
+
+    def fork(self) -> DesignContext:
+        return self.checkpoint().restore()
 
     def run_pass(self, command: str) -> None:
         ys.run_pass(command, self.design)

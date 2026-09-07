@@ -13,7 +13,7 @@ from gateforge.placement import (
 )
 from gateforge.providers.lbp.common import LBP_PROVIDER, LBP_WIRE
 from gateforge.providers.lbp.objects import make_lbp_provider
-from gateforge.providers.lbp.types import LBPNotGateType
+from gateforge.providers.lbp.types import LBPAndGateType, LBPNotGateType
 from gateforge.target import PortDirection
 from tests.test_graph import (
     ADDITIVE_NODE,
@@ -180,7 +180,80 @@ class TopologicalPlacementTests(unittest.TestCase):
 
         self.assertEqual(
             [item.x for item in placed.placements.module_ports],
-            [-131.25, 131.25],
+            [-105.0, 105.0],
+        )
+
+    def test_routing_gap_rows_align_across_columns(self) -> None:
+        sources = tuple(
+            _material_object(
+                f"source_{index}",
+                LBPNotGateType(width=1, invert=False).get_type(),
+                chr(ord("a") + index * 2),
+            )
+            for index in range(6)
+        )
+        sinks = tuple(
+            _material_object(
+                f"sink_{index}",
+                LBPNotGateType(width=1, invert=False).get_type(),
+                chr(ord("m") + index * 2),
+            )
+            for index in range(6)
+        )
+        nets = tuple(
+            _material_net(
+                LBP_WIRE,
+                MaterialObjectPortRef(source.identifier, "OUT"),
+                MaterialObjectPortRef(sink.identifier, "IN_0"),
+            )
+            for source, sink in zip(sources, sinks)
+        )
+        graph = MaterialGraph.from_design(
+            MaterialDesign((*sources, *sinks), nets),
+            {LBP_PROVIDER: make_lbp_provider()},
+        )
+
+        placed = TopologicalPlacer(
+            providers={LBP_PROVIDER: make_lbp_provider()}
+        ).place(graph).finalize(graph)
+        by_object = {
+            item.object: item for item in placed.placements.objects
+        }
+        source_y = sorted(by_object[item.identifier].y for item in sources)
+        sink_y = sorted(by_object[item.identifier].y for item in sinks)
+
+        self.assertEqual(source_y, sink_y)
+        self.assertEqual(
+            [right - left for left, right in zip(source_y, source_y[1:])],
+            [105.0, 105.0, 105.0, 105.0, 210.0],
+        )
+
+    def test_provider_geometry_reserves_multiple_rows_for_wide_gates(self) -> None:
+        wide = _material_object(
+            "wide",
+            LBPAndGateType(width=5, invert=False).get_type(),
+            "a",
+        )
+        narrow = _material_object(
+            "narrow",
+            LBPNotGateType(width=1, invert=False).get_type(),
+            "c",
+        )
+        graph = MaterialGraph.from_design(
+            MaterialDesign((wide, narrow), ()),
+            {LBP_PROVIDER: make_lbp_provider()},
+        )
+
+        placed = TopologicalPlacer(
+            providers={LBP_PROVIDER: make_lbp_provider()}
+        ).place(graph).finalize(graph)
+        by_object = {
+            item.object: item for item in placed.placements.objects
+        }
+
+        self.assertGreaterEqual(
+            abs(by_object[wide.identifier].y - by_object[narrow.identifier].y),
+            210.0,
         )
 
     def test_isolated_object_uses_exact_midpoint_of_object_span(self) -> None:

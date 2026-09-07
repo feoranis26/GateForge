@@ -39,8 +39,8 @@ class MappingPipelineTests(unittest.TestCase):
     def test_abc_optimizes_residual_logic_before_leaf_mapping(self) -> None:
         _, state, material = compile_material(str(FIXTURE))
 
-        self.assertEqual(len(state.claims), 6)
-        self.assertEqual(len(material.objects), 7)
+        self.assertEqual(len(state.claims), 5)
+        self.assertEqual(len(material.objects), 6)
 
     def test_abc_stage_can_be_omitted(self) -> None:
         _, state, material = compile_material(
@@ -48,8 +48,8 @@ class MappingPipelineTests(unittest.TestCase):
             stages=default_mapping_stages(use_abc=False),
         )
 
-        self.assertEqual(len(state.claims), 8)
-        self.assertEqual(len(material.objects), 8)
+        self.assertEqual(len(state.claims), 6)
+        self.assertEqual(len(material.objects), 6)
 
 
 if __name__ == "__main__":

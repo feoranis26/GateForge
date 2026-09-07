@@ -11,6 +11,8 @@ from gateforge.providers.lbp.plan import (
     LbpGadgetKind,
     LbpGadgetPlacement,
     LbpGadgetSource,
+    LbpNote,
+    LbpNoteId,
     LbpPlanDesign,
     LbpPlanMetadata,
 )
@@ -56,6 +58,7 @@ def _plan(
     gadgets: tuple[LbpGadget, ...],
     placements: tuple[LbpGadgetPlacement, ...],
     connections: tuple[LbpConnection, ...] = (),
+    notes: tuple[LbpNote, ...] = (),
 ) -> LbpPlanDesign:
     return LbpPlanDesign(
         gadgets,
@@ -63,6 +66,7 @@ def _plan(
         connections,
         LbpPlanMetadata("Test", "Description", "GateForge"),
         LbpBoardSize(420.0, 262.5),
+        notes,
     )
 
 
@@ -245,6 +249,54 @@ class LbpToolkitEncodingTests(unittest.TestCase):
             encode_lbp_toolkit_plan(plan),
             encode_lbp_toolkit_plan(plan),
         )
+
+    def test_encodes_captured_note_script_and_component(self) -> None:
+        gadget = _gadget("input", LbpGadgetKind.NOT, 1)
+        note = LbpNote(
+            LbpNoteId("input-note"),
+            "data[3]",
+            -105.0,
+            52.5,
+        )
+        plan = _plan(
+            (gadget,),
+            (_placement(gadget, 0.0, 52.5, 1.4666667),),
+            notes=(note,),
+        )
+
+        encoded = encode_lbp_toolkit_plan(plan)
+        things = _full_things(encoded)
+        note_thing = next(item for item in things.values() if "PScript" in item)
+        fields = {
+            item["name"]: item
+            for item in note_thing["PScript"]["instance"]["instanceLayout"]["fields"]
+        }
+        components = encoded["resource"]["things"][0]["PMicrochip"]["components"]
+        note_component = next(
+            item
+            for item in components
+            if (item["thing"] if isinstance(item["thing"], int) else item["thing"]["UID"])
+            == note_thing["UID"]
+        )
+
+        self.assertEqual(note_thing["planGUID"], 95485)
+        self.assertEqual(
+            note_thing["PScript"]["instance"]["script"],
+            {"value": 95484, "type": "SCRIPT"},
+        )
+        self.assertEqual(
+            note_thing["PScript"]["instance"]["instanceLayout"]["instanceSize"],
+            249,
+        )
+        self.assertEqual(
+            fields["Text"]["value"],
+            {"type": "STRINGW", "value": "data[3]"},
+        )
+        self.assertTrue(fields["UserEntered"]["value"])
+        self.assertEqual(fields["FontSize"]["value"], 32.0)
+        self.assertEqual(fields["NoteVisibility"]["value"], 2)
+        self.assertEqual(note_component["x"], -105.0)
+        self.assertEqual(note_component["y"], 52.5)
 
 
 if __name__ == "__main__":

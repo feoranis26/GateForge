@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+import re
 from types import MappingProxyType
 from typing import Any
 
@@ -9,6 +10,33 @@ from gateforge.target import PortDirection
 
 class SnapshotError(ValueError):
     pass
+
+
+_BINARY_VALUE = re.compile(r"[01]+")
+
+
+@dataclass(frozen=True, slots=True)
+class YosysParameterValue:
+    raw: str
+
+    def as_unsigned_int(self) -> int:
+        if _BINARY_VALUE.fullmatch(self.raw) is None:
+            raise SnapshotError(
+                f"Yosys parameter {self.raw!r} is not a known binary integer"
+            )
+        return int(self.raw, 2)
+
+    def as_signed_int(self) -> int:
+        unsigned = self.as_unsigned_int()
+        sign_bit = 1 << (len(self.raw) - 1)
+        return unsigned - (sign_bit << 1) if unsigned & sign_bit else unsigned
+
+    def as_ascii_string(self) -> str:
+        if not self.raw or any(ord(character) < 32 or ord(character) > 126 for character in self.raw):
+            raise SnapshotError(
+                f"Yosys parameter {self.raw!r} is not a printable ASCII string"
+            )
+        return self.raw
 
 
 class ConstantValue(StrEnum):
@@ -91,6 +119,15 @@ class CellSnapshot:
     def anchor(self) -> str | None:
         return self.attributes.get("gateforge_id")
 
+    def parameter(self, name: str) -> YosysParameterValue:
+        try:
+            return YosysParameterValue(self.parameters[name])
+        except KeyError as error:
+            raise SnapshotError(
+                f"Cell {self.identifier.module}.{self.identifier.name} has no "
+                f"parameter {name!r}"
+            ) from error
+
 
 @dataclass(frozen=True, slots=True)
 class ModulePortSnapshot:
@@ -160,6 +197,61 @@ class ModuleSnapshot:
                         )
 
         return frozenset(cuts)
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleDependencyGraph:
+    module: ModuleSnapshot
+    drivers: Mapping[SnapshotBitRef, SourceEndpoint]
+    consumers: Mapping[SnapshotBitRef, frozenset[SourceEndpoint]]
+
+    @classmethod
+    def from_module(cls, module: ModuleSnapshot) -> "ModuleDependencyGraph":
+        drivers: dict[SnapshotBitRef, SourceEndpoint] = {}
+        consumers: dict[SnapshotBitRef, frozenset[SourceEndpoint]] = {}
+        for bit, endpoints in module.endpoints.items():
+            bit_drivers: list[SourceEndpoint] = []
+            bit_consumers: list[SourceEndpoint] = []
+            for endpoint in endpoints:
+                if isinstance(endpoint, CellPortIdentifier):
+                    direction = module.cells[endpoint.cell.name].ports[
+                        endpoint.name
+                    ].direction
+                    is_driver = direction == PortDirection.OUTPUT
+                else:
+                    direction = module.ports[endpoint.name].direction
+                    is_driver = direction == PortDirection.INPUT
+                if direction == PortDirection.INOUT:
+                    raise SnapshotError(
+                        f"Cannot index inout endpoint {endpoint} in module "
+                        f"{module.name!r}"
+                    )
+                if is_driver:
+                    bit_drivers.append(endpoint)
+                else:
+                    bit_consumers.append(endpoint)
+            if len(bit_drivers) > 1:
+                raise SnapshotError(
+                    f"Signal {module.name}.{bit.bit_id} has multiple drivers: "
+                    f"{sorted(bit_drivers)!r}"
+                )
+            if bit_drivers:
+                drivers[bit] = bit_drivers[0]
+            consumers[bit] = frozenset(bit_consumers)
+        return cls(
+            module=module,
+            drivers=MappingProxyType(drivers),
+            consumers=MappingProxyType(consumers),
+        )
+
+    def driver(self, bit: SnapshotBitRef) -> SourceEndpoint | None:
+        return self.drivers.get(bit)
+
+    def signal_consumers(
+        self,
+        bit: SnapshotBitRef,
+    ) -> frozenset[SourceEndpoint]:
+        return self.consumers.get(bit, frozenset())
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,5 +1,6 @@
 from collections import defaultdict
 from collections.abc import Hashable, Mapping
+from dataclasses import dataclass
 import json
 
 from gateforge.design import DesignContext, rtlil_id
@@ -8,6 +9,9 @@ from gateforge.material import (
     MaterialConstantRef,
     MaterialDesign,
     MaterialModulePortRef,
+    MaterialModuleOccurrence,
+    MaterialModulePort,
+    MaterialNetId,
     MaterialNet,
     MaterialObject,
     MaterialObjectId,
@@ -30,6 +34,22 @@ from gateforge.target import (
 
 class MaterializationError(ValueError):
     pass
+
+
+type _SignalOccurrence = tuple[str, SnapshotBitRef]
+
+
+@dataclass(slots=True)
+class _ModuleDraft:
+    path: str
+    module: str
+    implementation: str
+    parent: str | None
+    instance: str | None
+    anchor: str | None
+    ports: list[tuple[str, int, PortDirection, _SignalOccurrence | None]]
+    objects: list[MaterialObjectId]
+    children: list[str]
 
 
 class _DisjointSet:
@@ -270,6 +290,320 @@ def materialize(
     return material
 
 
+def materialize_hierarchy(
+    context: DesignContext,
+    state: CompilationIntermediateState,
+    providers: Mapping[str, TargetProvider],
+    top_module: str,
+) -> MaterialDesign:
+    if state.revision != context.revision:
+        raise MaterializationError(
+            f"State revision {state.revision} does not match design revision "
+            f"{context.revision}"
+        )
+    snapshot = context.snapshot()
+    signal_sets = _DisjointSet()
+    local_sets = _DisjointSet()
+    objects: dict[MaterialObjectId, MaterialObject] = {}
+    local_types: dict[tuple[OccurrenceId, str], NetworkTypeIdentifier] = {}
+    local_attachments: dict[
+        tuple[OccurrenceId, str], set[MaterialAttachment]
+    ] = defaultdict(set)
+    signal_to_local: dict[
+        _SignalOccurrence, list[tuple[OccurrenceId, str]]
+    ] = defaultdict(list)
+    local_constants: dict[
+        tuple[OccurrenceId, str], set[MaterialConstantRef]
+    ] = defaultdict(set)
+    signal_constants: dict[_SignalOccurrence, set[MaterialConstantRef]] = defaultdict(set)
+    drafts: list[_ModuleDraft] = []
+
+    def signal(path: str, bit: SnapshotBitRef) -> _SignalOccurrence:
+        result = (path, bit)
+        signal_sets.add(result)
+        return result
+
+    def visit_module(
+        implementation: str,
+        path_parts: tuple[str, ...],
+        parent: str | None,
+        instance: str | None,
+        anchor: str | None,
+        active_modules: frozenset[str],
+    ) -> None:
+        if implementation in active_modules:
+            raise MaterializationError(
+                f"Recursive module hierarchy encountered at {implementation!r}"
+            )
+        module = snapshot.module(implementation)
+        path = "/".join(path_parts)
+        draft = _ModuleDraft(
+            path=path,
+            module=module.attributes.get("hdlname", module.name),
+            implementation=module.name,
+            parent=parent,
+            instance=instance,
+            anchor=anchor,
+            ports=[],
+            objects=[],
+            children=[],
+        )
+        drafts.append(draft)
+        for port in module.ports.values():
+            for bit_index, bit in enumerate(port.bits):
+                reference = signal(path, bit) if isinstance(bit, SnapshotBitRef) else None
+                draft.ports.append(
+                    (port.identifier, bit_index, port.direction, reference)
+                )
+
+        next_active = active_modules | {implementation}
+        for cell in module.cells.values():
+            claim_value = cell.attributes.get("gateforge_claim_definition")
+            prefab_value = cell.attributes.get("gateforge_prefab")
+            if claim_value is not None and prefab_value is not None:
+                claim_id = ClaimDefinitionId(claim_value)
+                try:
+                    claim = state.claims[claim_id]
+                    prefab = state.prefabs[claim.prefab]
+                except KeyError as error:
+                    raise MaterializationError(
+                        f"Claim occurrence {module.name}.{cell.identifier.name} "
+                        "refers to missing state"
+                    ) from error
+                if claim.prefab.value != prefab_value:
+                    raise MaterializationError(
+                        f"Claim occurrence {module.name}.{cell.identifier.name} has "
+                        f"prefab {prefab_value}, expected {claim.prefab.value}"
+                    )
+                occurrence = make_occurrence_id(
+                    top_module,
+                    None,
+                    path,
+                    claim_id.value,
+                )
+                role_to_object: dict[str, MaterialObjectId] = {}
+                for prefab_object in prefab.objects:
+                    identifier = make_material_object_id(
+                        occurrence,
+                        claim.prefab,
+                        prefab_object.role,
+                    )
+                    role_to_object[prefab_object.role] = identifier
+                    draft.objects.append(identifier)
+                    objects[identifier] = MaterialObject(
+                        identifier=identifier,
+                        occurrence=occurrence,
+                        prefab=claim.prefab,
+                        role=prefab_object.role,
+                        type=prefab_object.type,
+                        hierarchy=path,
+                        configuration=prefab_object.configuration,
+                    )
+
+                external_to_local: dict[
+                    PrefabPortRef, tuple[OccurrenceId, str]
+                ] = {}
+                for prefab_net in prefab.nets:
+                    local_key = (occurrence, prefab_net.role)
+                    local_sets.add(local_key)
+                    local_types[local_key] = prefab_net.type
+                    for attachment in prefab_net.attachments:
+                        if isinstance(attachment, ObjectPortRef):
+                            local_attachments[local_key].add(
+                                MaterialObjectPortRef(
+                                    role_to_object[attachment.object_role],
+                                    attachment.port,
+                                    attachment.bit,
+                                )
+                            )
+                        elif isinstance(attachment, PrefabPortRef):
+                            if attachment in external_to_local:
+                                raise MaterializationError(
+                                    f"Prefab port {attachment} is attached to multiple nets"
+                                )
+                            external_to_local[attachment] = local_key
+                for binding in claim.ports:
+                    try:
+                        cell_port = cell.ports[binding.formal]
+                        local_key = external_to_local[binding.target]
+                    except KeyError as error:
+                        raise MaterializationError(
+                            f"Invalid claim port binding on {cell.identifier.name}"
+                        ) from error
+                    if len(cell_port.bits) != 1:
+                        raise MaterializationError(
+                            f"Claim formal {cell.identifier.name}.{binding.formal} "
+                            f"has width {len(cell_port.bits)}"
+                        )
+                    source = cell_port.bits[0]
+                    if isinstance(source, SnapshotBitRef):
+                        signal_to_local[signal(path, source)].append(local_key)
+                    else:
+                        local_constants[local_key].add(
+                            MaterialConstantRef(source.value.value)
+                        )
+                continue
+
+            child_module = snapshot.modules.get(cell.identifier.expected_type)
+            if child_module is None or "blackbox" in child_module.attributes:
+                if cell.identifier.expected_type != "$scopeinfo":
+                    raise MaterializationError(
+                        f"Unmapped cell {module.name}.{cell.identifier.name} "
+                        f"of type {cell.identifier.expected_type} remains"
+                    )
+                continue
+            token = (
+                f"anchor:{cell.anchor}"
+                if cell.anchor is not None
+                else f"name:{cell.identifier.name}"
+            )
+            child_parts = path_parts + (token,)
+            child_path = "/".join(child_parts)
+            draft.children.append(child_path)
+            visit_module(
+                child_module.name,
+                child_parts,
+                path,
+                cell.identifier.name,
+                cell.anchor,
+                next_active,
+            )
+            for port_name, child_port in child_module.ports.items():
+                try:
+                    parent_port = cell.ports[port_name]
+                except KeyError as error:
+                    raise MaterializationError(
+                        f"Module instance {module.name}.{cell.identifier.name} "
+                        f"has no connection for port {port_name}"
+                    ) from error
+                if len(parent_port.bits) != len(child_port.bits):
+                    raise MaterializationError(
+                        f"Module instance {module.name}.{cell.identifier.name}.{port_name} "
+                        "has incompatible port width"
+                    )
+                for parent_bit, child_bit in zip(parent_port.bits, child_port.bits):
+                    parent_signal = (
+                        signal(path, parent_bit)
+                        if isinstance(parent_bit, SnapshotBitRef)
+                        else None
+                    )
+                    child_signal = (
+                        signal(child_path, child_bit)
+                        if isinstance(child_bit, SnapshotBitRef)
+                        else None
+                    )
+                    if parent_signal is not None and child_signal is not None:
+                        signal_sets.union(parent_signal, child_signal)
+                    elif parent_signal is not None and isinstance(child_bit, ConstantBit):
+                        signal_constants[parent_signal].add(
+                            MaterialConstantRef(child_bit.value.value)
+                        )
+                    elif child_signal is not None and isinstance(parent_bit, ConstantBit):
+                        signal_constants[child_signal].add(
+                            MaterialConstantRef(parent_bit.value.value)
+                        )
+
+    root_path = f"module:{top_module}"
+    visit_module(top_module, (root_path,), None, None, None, frozenset())
+
+    root_to_local_keys: dict[Hashable, list[tuple[OccurrenceId, str]]] = defaultdict(list)
+    for signal_reference, local_keys in signal_to_local.items():
+        root_to_local_keys[signal_sets.find(signal_reference)].extend(local_keys)
+    for local_keys in root_to_local_keys.values():
+        first = local_keys[0]
+        for other in local_keys[1:]:
+            local_sets.union(first, other)
+
+    constants_by_signal_root: dict[Hashable, set[MaterialConstantRef]] = defaultdict(set)
+    for signal_reference, constants in signal_constants.items():
+        constants_by_signal_root[signal_sets.find(signal_reference)].update(constants)
+    for root, local_keys in root_to_local_keys.items():
+        for local_key in local_keys:
+            local_constants[local_key].update(constants_by_signal_root[root])
+
+    root_ports: dict[Hashable, set[MaterialModulePortRef]] = defaultdict(set)
+    root_draft = drafts[0]
+    for name, bit, direction, signal_reference in root_draft.ports:
+        if signal_reference is None:
+            continue
+        signal_root = signal_sets.find(signal_reference)
+        local_keys = root_to_local_keys.get(signal_root)
+        if local_keys:
+            root_ports[local_sets.find(local_keys[0])].add(
+                MaterialModulePortRef(top_module, name, bit, direction)
+            )
+
+    grouped_keys: dict[Hashable, list[tuple[OccurrenceId, str]]] = defaultdict(list)
+    for local_key in local_types:
+        grouped_keys[local_sets.find(local_key)].append(local_key)
+    material_nets: list[MaterialNet] = []
+    local_root_to_net: dict[Hashable, MaterialNetId] = {}
+    for local_root, local_keys in grouped_keys.items():
+        network_types = {local_types[key] for key in local_keys}
+        if len(network_types) != 1:
+            raise MaterializationError(
+                f"Material network joins incompatible types {network_types!r}"
+            )
+        network_type = next(iter(network_types))
+        attachments: set[MaterialAttachment] = set(root_ports[local_root])
+        for local_key in local_keys:
+            attachments.update(local_attachments[local_key])
+            attachments.update(local_constants[local_key])
+        frozen_attachments = frozenset(attachments)
+        identifier = make_material_net_id(network_type, frozen_attachments)
+        local_root_to_net[local_root] = identifier
+        material_nets.append(MaterialNet(identifier, network_type, frozen_attachments))
+
+    signal_root_to_net: dict[Hashable, MaterialNetId] = {}
+    for signal_root, local_keys in root_to_local_keys.items():
+        if local_keys:
+            signal_root_to_net[signal_root] = local_root_to_net[
+                local_sets.find(local_keys[0])
+            ]
+    modules = tuple(
+        MaterialModuleOccurrence(
+            path=draft.path,
+            module=draft.module,
+            implementation=draft.implementation,
+            parent=draft.parent,
+            instance=draft.instance,
+            anchor=draft.anchor,
+            ports=tuple(
+                MaterialModulePort(
+                    name,
+                    bit,
+                    direction,
+                    (
+                        signal_root_to_net.get(signal_sets.find(signal_reference))
+                        if signal_reference is not None
+                        else None
+                    ),
+                )
+                for name, bit, direction, signal_reference in draft.ports
+            ),
+            objects=tuple(sorted(draft.objects, key=lambda item: item.value)),
+            children=tuple(sorted(draft.children)),
+        )
+        for draft in drafts
+    )
+    material = MaterialDesign(
+        objects=tuple(objects.values()),
+        nets=tuple(material_nets),
+        modules=modules,
+    )
+    objects_by_id = {item.identifier: item for item in material.objects}
+    for net in material.nets:
+        try:
+            providers[net.type.provider].validate_material_net(net, objects_by_id)
+        except KeyError as error:
+            raise MaterializationError(
+                f"No provider is registered for material network {net.type}"
+            ) from error
+        except ValueError as error:
+            raise MaterializationError(str(error)) from error
+    return material
+
+
 def flatten_and_materialize(
     context: DesignContext,
     state: CompilationIntermediateState,
@@ -286,53 +620,8 @@ def flatten_and_materialize(
             f"Expected exactly one top module, found {top_modules!r}"
         )
 
-    stamped = 0
-
-    def stamp_module(
-        module_name: str,
-        path: tuple[str, ...],
-        active_modules: frozenset[str],
-    ) -> None:
-        nonlocal stamped
-        if module_name in active_modules:
-            raise MaterializationError(
-                f"Recursive module hierarchy encountered at {module_name!r}"
-            )
-        module = snapshot.module(module_name)
-        live_module = context.module(module_name)
-        next_active = active_modules | {module_name}
-        for cell in module.cells.values():
-            if "gateforge_claim_definition" in cell.attributes:
-                live_cell = live_module.cell(rtlil_id(cell.identifier.name))
-                if live_cell is None:
-                    raise MaterializationError(
-                        f"Claim cell {module_name}.{cell.identifier.name} disappeared"
-                    )
-                live_cell.set_string_attribute(
-                    rtlil_id("gateforge_occurrence_path"),
-                    json.dumps(path, separators=(",", ":")),
-                )
-                stamped += 1
-                continue
-            child_module = snapshot.modules.get(cell.identifier.expected_type)
-            if child_module is None or "blackbox" in child_module.attributes:
-                continue
-            token = (
-                f"anchor:{cell.anchor}"
-                if cell.anchor is not None
-                else f"name:{cell.identifier.name}"
-            )
-            stamp_module(
-                child_module.name,
-                path + (token,),
-                next_active,
-            )
-
     top_module = top_modules[0]
-    stamp_module(top_module, (f"module:{top_module}",), frozenset())
-    if stamped:
-        context.mark_mutated()
-        state = state.with_revision(context.revision)
+    material = materialize_hierarchy(context, state, providers, top_module)
     context.run_pass("flatten -noscopeinfo")
     state = state.with_revision(context.revision)
-    return state, materialize(context, state, providers)
+    return state, material

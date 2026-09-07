@@ -3,8 +3,11 @@ import unittest
 
 from gateforge.source import (
     CellIdentifier,
+    CellPortIdentifier,
     ConstantBoundarySource,
     DesignSnapshot,
+    ModuleDependencyGraph,
+    ModulePortIdentifier,
     SnapshotBitRef,
     SnapshotError,
 )
@@ -60,6 +63,30 @@ class DesignSnapshotTests(unittest.TestCase):
         endpoints = module.endpoints[SnapshotBitRef(7, "top", 3)]
 
         self.assertEqual(len(endpoints), 3)
+
+    def test_dependency_graph_distinguishes_driver_from_consumers(self) -> None:
+        module = DesignSnapshot.from_json(_design_json(), revision=7).module("top")
+        graph = ModuleDependencyGraph.from_module(module)
+        input_bit = SnapshotBitRef(7, "top", 2)
+        shared_bit = SnapshotBitRef(7, "top", 3)
+
+        self.assertEqual(
+            graph.driver(input_bit),
+            ModulePortIdentifier("top", "A", 0),
+        )
+        self.assertEqual(
+            graph.driver(shared_bit),
+            CellPortIdentifier(module.cells["first"].identifier, "Y", 0),
+        )
+        self.assertEqual(
+            graph.signal_consumers(shared_bit),
+            frozenset(
+                {
+                    CellPortIdentifier(module.cells["second"].identifier, "A", 0),
+                    CellPortIdentifier(module.cells["fanout"].identifier, "A", 0),
+                }
+            ),
+        )
 
     def test_cut_collapses_fanout_and_excludes_internal_bits(self) -> None:
         snapshot = DesignSnapshot.from_json(_design_json(), revision=7)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+import math
 from typing import Callable, Protocol
 
 from gateforge.material import (
@@ -12,6 +13,7 @@ from gateforge.material import (
 )
 from gateforge.target import (
     ObjectTypeIdentifier,
+    ObjectPlacementGeometry,
     PrefabValidationError,
     ProviderConfiguration,
     SemanticPrefab,
@@ -52,6 +54,14 @@ class TargetProvider:
     dependency_projector: Callable[
         [MaterialNet, Mapping[MaterialObjectId, MaterialObject], TargetTypeRegistry],
         Iterable[ProjectedDependency],
+    ] | None = None
+    object_geometry_resolver: Callable[
+        [MaterialObject, TargetTypeRegistry],
+        ObjectPlacementGeometry,
+    ] | None = None
+    object_cost_resolver: Callable[
+        [MaterialObject, TargetTypeRegistry],
+        float,
     ] | None = None
 
     def validate(self, prefab: SemanticPrefab) -> None:
@@ -146,3 +156,23 @@ class TargetProvider:
                 f"Provider {self.identifier!r} does not define dependency projection"
             )
         return tuple(self.dependency_projector(net, objects, self.registry))
+
+    def object_placement_geometry(
+        self,
+        material_object: MaterialObject,
+    ) -> ObjectPlacementGeometry | None:
+        self._require_object_type_provider(material_object.type)
+        if self.object_geometry_resolver is None:
+            return None
+        return self.object_geometry_resolver(material_object, self.registry)
+
+    def material_object_cost(self, material_object: MaterialObject) -> float:
+        self._require_object_type_provider(material_object.type)
+        if self.object_cost_resolver is not None:
+            value = float(self.object_cost_resolver(material_object, self.registry))
+        else:
+            geometry = self.object_placement_geometry(material_object)
+            value = 1.0 if geometry is None else geometry.width * geometry.height
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("Material object cost must be finite and nonnegative")
+        return value

@@ -9,6 +9,7 @@ from gateforge.gateforge import main
 
 
 FIXTURE = Path(__file__).parents[1] / "scratch" / "basic.v"
+NESTED_FIXTURE = Path(__file__).parents[1] / "scratch" / "basic_nested.v"
 
 
 class CliTests(unittest.TestCase):
@@ -37,6 +38,30 @@ class CliTests(unittest.TestCase):
     def test_compile_creates_parent_directories_and_both_artifacts(self) -> None:
         self.assertTrue(self.material_path.is_file())
         self.assertTrue(self.one_shot_path.is_file())
+
+    def test_compile_emits_mapping_search_report(self) -> None:
+        report_path = Path(self.directory.name) / "search" / "report.json"
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            main(
+                [
+                    "compile",
+                    str(FIXTURE),
+                    "--mapping-search",
+                    "beam",
+                    "--emit-search-report",
+                    str(report_path),
+                ]
+            )
+
+        report = json.loads(report_path.read_text())
+        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(len(report["stages"]), 4)
+        self.assertIsInstance(report["winner"], str)
+        self.assertTrue(report["terminal_candidates"])
+        self.assertIn(
+            "provider_object_cost",
+            report["terminal_candidates"][0]["score"],
+        )
 
     def test_reloaded_placement_matches_one_shot_output(self) -> None:
         reloaded = Path(self.directory.name) / "reloaded.json"
@@ -100,8 +125,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(value["revision"], 35128313)
         self.assertEqual(root["PSwitch"]["type"], "MICROCHIP")
         self.assertEqual(details["name"], "test")
-        self.assertIn("7 material objects", details["description"])
-        self.assertIn("Exported 7 material gadgets", stdout.getvalue())
+        self.assertIn("6 material objects", details["description"])
+        self.assertIn("Exported 6 material gadgets", stdout.getvalue())
 
     def test_lbp_toolkit_export_applies_metadata_overrides_deterministically(self) -> None:
         first = Path(self.directory.name) / "first-object.json"
@@ -153,6 +178,73 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 1)
         self.assertFalse(output.exists())
+
+    def test_synthesis_flat_removes_nested_material_occurrences(self) -> None:
+        material = Path(self.directory.name) / "flat-nested-material.json"
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            main(
+                [
+                    "compile",
+                    str(NESTED_FIXTURE),
+                    "--synthesis-hierarchy",
+                    "flat",
+                    "--emit-material",
+                    str(material),
+                ]
+            )
+
+        value = json.loads(material.read_text())
+        self.assertEqual(len(value["modules"]), 1)
+
+    def test_lbp_toolkit_export_preserves_module_microchips(self) -> None:
+        root = Path(self.directory.name) / "hierarchical"
+        material = root / "material.json"
+        placement = root / "placement.json"
+        output = root / "object.json"
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            main(
+                [
+                    "compile",
+                    str(NESTED_FIXTURE),
+                    "--emit-material",
+                    str(material),
+                    "--emit-placement",
+                    str(placement),
+                ]
+            )
+            main(
+                [
+                    "export",
+                    "lbp-toolkit",
+                    str(material),
+                    str(placement),
+                    "--physical-hierarchy",
+                    "preserve-all",
+                    "--output",
+                    str(output),
+                ]
+            )
+
+        value = json.loads(output.read_text())
+        things = {}
+
+        def collect(item):
+            if isinstance(item, dict):
+                if isinstance(item.get("UID"), int):
+                    things[item["UID"]] = item
+                for child in item.values():
+                    collect(child)
+            elif isinstance(item, list):
+                for child in item:
+                    collect(child)
+
+        collect(value)
+        chips = [
+            item
+            for item in things.values()
+            if item.get("PSwitch", {}).get("type") == "MICROCHIP"
+        ]
+        self.assertEqual(len(chips), 3)
 
 
 if __name__ == "__main__":

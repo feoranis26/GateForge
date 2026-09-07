@@ -105,6 +105,8 @@ class CompilationStateTests(unittest.TestCase):
             "GATE(invert=false):VARIABLE_WIDTH(width=1):NOT",
         )
         self.assertEqual(restored.canonical_data(), state.canonical_data())
+        self.assertEqual(restored.canonical_bytes(), state.canonical_bytes())
+        self.assertEqual(restored.get_digest(), state.get_digest())
 
     def test_acceptance_interns_prefab_and_durable_claim(self) -> None:
         prefab = _prefab()

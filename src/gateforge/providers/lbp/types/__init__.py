@@ -1,11 +1,21 @@
 from gateforge.providers.lbp.common import LBP_PROVIDER, LBP_TYPE_VERSION
-from gateforge.providers.lbp.types.base import LBPGateType, LBP_OBJECT_TYPES
+from gateforge.providers.lbp.types.base import (
+    LBPGateType,
+    LBPObjectType,
+    LBP_OBJECT_TYPES,
+)
 from gateforge.providers.lbp.types.combinatorial import (
     LBPAndGateType,
     LBPCombinatorialVariableWidthGateType,
     LBPNotGateType,
     LBPOrGateType,
     LBPXorGateType,
+)
+from gateforge.providers.lbp.types.intrinsic import (
+    LBPCounterType,
+    LBPRandomizerType,
+    LBPSelectorType,
+    LBPTimerType,
 )
 from gateforge.target import ObjectTypeIdentifier, PrefabValidationError
 from gateforge.type_codec import (
@@ -15,7 +25,7 @@ from gateforge.type_codec import (
 )
 
 
-def decode_lbp_object_type(identifier: ObjectTypeIdentifier) -> LBPGateType:
+def decode_lbp_object_type(identifier: ObjectTypeIdentifier) -> LBPObjectType:
     if identifier.provider != LBP_PROVIDER or identifier.version != LBP_TYPE_VERSION:
         raise PrefabValidationError(f"Unsupported LBP object identifier {identifier}")
 
@@ -37,9 +47,14 @@ def decode_lbp_object_type(identifier: ObjectTypeIdentifier) -> LBPGateType:
 __all__ = [
     "LBPAndGateType",
     "LBPCombinatorialVariableWidthGateType",
+    "LBPCounterType",
     "LBPGateType",
     "LBPNotGateType",
+    "LBPObjectType",
     "LBPOrGateType",
+    "LBPRandomizerType",
+    "LBPSelectorType",
+    "LBPTimerType",
     "LBPXorGateType",
     "decode_lbp_object_type",
 ]

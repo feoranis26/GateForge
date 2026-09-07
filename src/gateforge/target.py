@@ -139,6 +139,24 @@ class NetworkTypeSchema:
     signal: SignalTypeIdentifier
 
 
+@dataclass(frozen=True, slots=True)
+class ObjectPlacementGeometry:
+    width: float
+    height: float
+
+    def __post_init__(self) -> None:
+        for attribute in ("width", "height"):
+            value = getattr(self, attribute)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"Object placement {attribute} must be numeric")
+            normalized = float(value)
+            if not math.isfinite(normalized) or normalized <= 0:
+                raise ValueError(
+                    f"Object placement {attribute} must be finite and positive"
+                )
+            object.__setattr__(self, attribute, normalized)
+
+
 class TargetTypeRegistry:
     def __init__(self) -> None:
         self._objects: dict[ObjectTypeIdentifier, ObjectTypeSchema] = {}

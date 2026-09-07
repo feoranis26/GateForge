@@ -15,12 +15,73 @@ class LbpGadgetKind(StrEnum):
     OR = "OR"
     XOR = "XOR"
     BATTERY = "ALWAYS_ON"
+    TIMER = "TIMER"
+    COUNTER = "COUNTDOWN"
+    RANDOMIZER = "RANDOM"
+    SELECTOR = "SELECTOR"
 
 
 class LbpGadgetSource(StrEnum):
     MATERIAL_OBJECT = "material_object"
     MODULE_PORT = "module_port"
     CONSTANT = "constant"
+
+
+@dataclass(frozen=True, slots=True)
+class LbpSwitchSettings:
+    radius: float = 250.0
+    color_index: int = 0
+    activation_hold_time: int = 0
+    bullets_required: int | None = None
+    bullets_detected: int = 0
+    bullet_refresh_time: int = 0
+    reset_when_full: bool = False
+    timer_count: float = 0.0
+    behavior: str | int | None = "OFF_ON"
+    random_behavior: int = 1
+    random_pattern: int = 0
+    random_on_time_min: int = 30
+    random_on_time_max: int = 30
+    random_off_time_min: int = 0
+    random_off_time_max: int | None = None
+    random_non_repeating: bool = False
+    player_mode: int = 1
+
+    def __post_init__(self) -> None:
+        integer_fields = (
+            "activation_hold_time",
+            "bullets_detected",
+            "bullet_refresh_time",
+            "random_behavior",
+            "random_pattern",
+            "random_on_time_min",
+            "random_on_time_max",
+            "random_off_time_min",
+            "color_index",
+            "player_mode",
+        )
+        for name in integer_fields:
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise LbpPlanRealizationError(
+                    f"LBP switch setting {name} must be a nonnegative integer"
+                )
+        for name in ("bullets_required", "random_off_time_max"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                raise LbpPlanRealizationError(
+                    f"LBP switch setting {name} must be a nonnegative integer"
+                )
+        if not math.isfinite(float(self.timer_count)) or self.timer_count < 0:
+            raise LbpPlanRealizationError(
+                "LBP switch timer_count must be finite and nonnegative"
+            )
+        if not math.isfinite(float(self.radius)) or self.radius <= 0:
+            raise LbpPlanRealizationError(
+                "LBP switch radius must be finite and positive"
+            )
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -41,6 +102,8 @@ class LbpGadget:
     inverted: bool = False
     name: str = ""
     manual_activation: bool = False
+    output_arity: int = 1
+    settings: LbpSwitchSettings = LbpSwitchSettings()
 
     def __post_init__(self) -> None:
         if not isinstance(self.arity, int) or isinstance(self.arity, bool):
@@ -52,8 +115,31 @@ class LbpGadget:
                 raise LbpPlanRealizationError("LBP batteries cannot be inverted")
         elif self.arity <= 0:
             raise LbpPlanRealizationError("LBP logic gadget arity must be positive")
+        if (
+            not isinstance(self.output_arity, int)
+            or isinstance(self.output_arity, bool)
+            or self.output_arity <= 0
+        ):
+            raise LbpPlanRealizationError(
+                "LBP gadget output arity must be a positive integer"
+            )
         if self.kind == LbpGadgetKind.NOT and self.arity != 1:
             raise LbpPlanRealizationError("LBP NOT gadgets require exactly one input")
+        if self.kind == LbpGadgetKind.TIMER and self.arity != 2:
+            raise LbpPlanRealizationError("LBP Timer gadgets require two inputs")
+        if self.kind == LbpGadgetKind.COUNTER and self.arity != 2:
+            raise LbpPlanRealizationError("LBP Counter gadgets require two inputs")
+        if self.kind == LbpGadgetKind.RANDOMIZER and self.arity != 1:
+            raise LbpPlanRealizationError(
+                "LBP Randomizer gadgets require one input"
+            )
+        if (
+            self.kind == LbpGadgetKind.SELECTOR
+            and self.arity != self.output_arity + 1
+        ):
+            raise LbpPlanRealizationError(
+                "LBP Selector gadgets require CYCLE plus one input per output"
+            )
 
     @property
     def input_count(self) -> int:
@@ -61,7 +147,7 @@ class LbpGadget:
 
     @property
     def output_count(self) -> int:
-        return 1
+        return self.output_arity
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +227,134 @@ class LbpBoardSize:
             object.__setattr__(self, attribute, normalized)
 
 
+@dataclass(frozen=True, slots=True, order=True)
+class LbpNoteId:
+    value: str
+
+    def __post_init__(self) -> None:
+        if not self.value:
+            raise LbpPlanRealizationError("LBP note ID must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class LbpNote:
+    identifier: LbpNoteId
+    text: str
+    x: float
+    y: float
+    angle: float = 0.0
+    scale_x: float = 1.4666667
+    scale_y: float = 1.4666667
+
+    def __post_init__(self) -> None:
+        if not self.text:
+            raise LbpPlanRealizationError("LBP note text must not be empty")
+        for attribute in ("x", "y", "angle", "scale_x", "scale_y"):
+            value = getattr(self, attribute)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise LbpPlanRealizationError(
+                    f"LBP note {attribute} must be numeric"
+                )
+            normalized = float(value)
+            if not math.isfinite(normalized):
+                raise LbpPlanRealizationError(
+                    f"LBP note {attribute} must be finite"
+                )
+            object.__setattr__(self, attribute, normalized)
+        if self.scale_x <= 0 or self.scale_y <= 0:
+            raise LbpPlanRealizationError("LBP note scale must be positive")
+
+
+class LbpThingKind(StrEnum):
+    GADGET = "gadget"
+    MICROCHIP = "microchip"
+    BOARD = "board"
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class LbpThingEndpoint:
+    kind: LbpThingKind
+    identifier: str
+    port: int
+
+    def __post_init__(self) -> None:
+        if not self.identifier:
+            raise LbpPlanRealizationError("LBP Thing endpoint ID must not be empty")
+        if not isinstance(self.port, int) or isinstance(self.port, bool) or self.port < 0:
+            raise LbpPlanRealizationError(
+                "LBP Thing endpoint port must be a nonnegative integer"
+            )
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class LbpRoutedConnection:
+    source: LbpThingEndpoint
+    target: LbpThingEndpoint
+
+
+@dataclass(frozen=True, slots=True)
+class LbpContainer:
+    path: str
+    parent: str | None
+    name: str
+    input_nets: tuple[str, ...]
+    output_nets: tuple[str, ...]
+    gadgets: tuple[LbpGadgetId, ...]
+    notes: tuple[LbpNoteId, ...]
+    children: tuple[str, ...]
+    x: float
+    y: float
+    board_size: LbpBoardSize
+
+    def __post_init__(self) -> None:
+        if not self.path or not self.name:
+            raise LbpPlanRealizationError("LBP container names must not be empty")
+        if len(set(self.input_nets)) != len(self.input_nets):
+            raise LbpPlanRealizationError(
+                f"LBP container {self.path!r} has duplicate input nets"
+            )
+        if len(set(self.output_nets)) != len(self.output_nets):
+            raise LbpPlanRealizationError(
+                f"LBP container {self.path!r} has duplicate output nets"
+            )
+        if not math.isfinite(float(self.x)) or not math.isfinite(float(self.y)):
+            raise LbpPlanRealizationError("LBP container placement must be finite")
+        object.__setattr__(self, "x", float(self.x))
+        object.__setattr__(self, "y", float(self.y))
+
+
+@dataclass(frozen=True, slots=True)
+class LbpPlanHierarchy:
+    root: str
+    containers: tuple[LbpContainer, ...]
+    connections: tuple[LbpRoutedConnection, ...]
+
+    def __post_init__(self) -> None:
+        containers = tuple(sorted(self.containers, key=lambda item: item.path))
+        connections = tuple(sorted(set(self.connections)))
+        by_path = {item.path: item for item in containers}
+        if len(by_path) != len(containers):
+            raise LbpPlanRealizationError("LBP hierarchy has duplicate container paths")
+        try:
+            root = by_path[self.root]
+        except KeyError as error:
+            raise LbpPlanRealizationError("LBP hierarchy root is missing") from error
+        if root.parent is not None:
+            raise LbpPlanRealizationError("LBP hierarchy root must not have a parent")
+        for container in containers:
+            if container.parent is not None and container.parent not in by_path:
+                raise LbpPlanRealizationError(
+                    f"LBP container {container.path!r} has missing parent"
+                )
+            for child in container.children:
+                if child not in by_path or by_path[child].parent != container.path:
+                    raise LbpPlanRealizationError(
+                        f"LBP container {container.path!r} has invalid child {child!r}"
+                    )
+        object.__setattr__(self, "containers", containers)
+        object.__setattr__(self, "connections", connections)
+
+
 @dataclass(frozen=True, slots=True)
 class LbpPlanDesign:
     gadgets: tuple[LbpGadget, ...]
@@ -148,6 +362,8 @@ class LbpPlanDesign:
     connections: tuple[LbpConnection, ...]
     metadata: LbpPlanMetadata
     board_size: LbpBoardSize
+    notes: tuple[LbpNote, ...] = ()
+    hierarchy: LbpPlanHierarchy | None = None
 
     def __post_init__(self) -> None:
         gadgets = tuple(sorted(self.gadgets, key=lambda item: item.identifier.value))
@@ -165,6 +381,7 @@ class LbpPlanDesign:
                 ),
             )
         )
+        notes = tuple(sorted(self.notes, key=lambda item: item.identifier.value))
         _require_unique(
             (item.identifier for item in gadgets),
             "LBP gadget ID",
@@ -175,6 +392,10 @@ class LbpPlanDesign:
         )
         if len(set(connections)) != len(connections):
             raise LbpPlanRealizationError("LBP plan contains duplicate connections")
+        _require_unique(
+            (item.identifier for item in notes),
+            "LBP note ID",
+        )
 
         gadgets_by_id = {item.identifier: item for item in gadgets}
         placement_ids = {item.gadget for item in placements}
@@ -223,10 +444,16 @@ class LbpPlanDesign:
                 raise LbpPlanRealizationError(
                     f"LBP gadget {placement.gadget.value!r} lies outside board Y extent"
                 )
+        for note in notes:
+            if abs(note.x) > self.board_size.x or abs(note.y) > self.board_size.y:
+                raise LbpPlanRealizationError(
+                    f"LBP note {note.identifier.value!r} lies outside board extent"
+                )
 
         object.__setattr__(self, "gadgets", gadgets)
         object.__setattr__(self, "placements", placements)
         object.__setattr__(self, "connections", connections)
+        object.__setattr__(self, "notes", notes)
 
 
 def _require_unique(values, context: str) -> None:

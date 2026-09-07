@@ -124,6 +124,23 @@ class LbpPlanRealizationTests(unittest.TestCase):
         output_id = io_gadgets["y"].identifier.value
         self.assertIn((input_id, 0, gate_id, 0), connections)
         self.assertIn((gate_id, 0, output_id, 0), connections)
+        notes = {item.text: item for item in realization.notes}
+        gadget_placements = {
+            item.gadget: item for item in realization.placements
+        }
+        self.assertEqual(set(notes), {"a", "y"})
+        self.assertEqual(
+            notes["a"].x,
+            gadget_placements[io_gadgets["a"].identifier].x - 105.0,
+        )
+        self.assertEqual(
+            notes["y"].x,
+            gadget_placements[io_gadgets["y"].identifier].x + 105.0,
+        )
+        self.assertEqual(
+            notes["a"].y,
+            gadget_placements[io_gadgets["a"].identifier].y,
+        )
 
     def test_vector_io_buffers_use_bit_suffixes(self) -> None:
         left = _material_object(
@@ -160,6 +177,10 @@ class LbpPlanRealizationTests(unittest.TestCase):
         }
 
         self.assertEqual(names, {"data[0]", "data[1]"})
+        self.assertEqual(
+            {item.text for item in realization.notes},
+            {"data[0]", "data[1]"},
+        )
 
     def test_synthesizes_binary_constant_batteries(self) -> None:
         for value in ("0", "1"):

@@ -8,7 +8,12 @@ from gateforge.providers.lbp.types.base import (
     LBPGateType,
     LBP_GATE_FAMILIES,
 )
-from gateforge.target import ObjectTypeSchema, PortDirection, PortSchema
+from gateforge.target import (
+    ObjectPlacementGeometry,
+    ObjectTypeSchema,
+    PortDirection,
+    PortSchema,
+)
 from gateforge.type_codec import (
     TypeClassRegistry,
     TypeCodecError,
@@ -57,6 +62,12 @@ class LBPCombinatorialVariableWidthGateType(LBPGateType):
         return ObjectTypeSchema(
             identifier=self.get_type(),
             ports=frozenset(ports),
+        )
+
+    def get_placement_geometry(self) -> ObjectPlacementGeometry:
+        return ObjectPlacementGeometry(
+            width=105.0,
+            height=52.5 * max(self.width, 2),
         )
 
     @classmethod

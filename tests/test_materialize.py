@@ -12,6 +12,7 @@ RENAMED_FIXTURE = Path(__file__).parent / "fixtures" / "hierarchy_renamed.v"
 PARAMETERIZED_FIXTURE = (
     Path(__file__).parent / "fixtures" / "parameterized_hierarchy.v"
 )
+NESTED_FIXTURE = Path(__file__).parents[1] / "scratch" / "basic_nested.v"
 
 
 class MaterializationTests(unittest.TestCase):
@@ -59,6 +60,38 @@ class MaterializationTests(unittest.TestCase):
             {item.hierarchy for item in material.objects},
             {"module:top/anchor:narrow", "module:top/anchor:wide"},
         )
+
+    def test_materialization_preserves_module_occurrences_and_boundary_nets(self) -> None:
+        _, _, material = compile_material(str(NESTED_FIXTURE))
+
+        modules = {item.path: item for item in material.modules}
+        root = modules["module:test_with_inverters"]
+        left = modules["module:test_with_inverters/name:inv1"]
+        right = modules["module:test_with_inverters/name:inv2"]
+
+        self.assertEqual(root.parent, None)
+        self.assertEqual(root.children, (left.path, right.path))
+        self.assertEqual(left.module, "myinverter")
+        self.assertEqual(right.module, "myinverter")
+        self.assertEqual(len(root.objects), 5)
+        self.assertEqual(len(left.objects), 1)
+        self.assertEqual(len(right.objects), 1)
+        root_ports = {(item.name, item.bit): item.net for item in root.ports}
+        left_ports = {(item.name, item.bit): item.net for item in left.ports}
+        right_ports = {(item.name, item.bit): item.net for item in right.ports}
+        self.assertEqual(left_ports[("i", 0)], root_ports[("myinput", 0)])
+        self.assertEqual(right_ports[("i", 0)], root_ports[("myotherinput", 0)])
+        self.assertIsNotNone(left_ports[("o", 0)])
+        self.assertIsNotNone(right_ports[("o", 0)])
+
+    def test_material_hierarchy_round_trips(self) -> None:
+        _, _, material = compile_material(str(NESTED_FIXTURE))
+        restored = type(material).from_canonical_data(
+            material.canonical_data(),
+            {LBP_PROVIDER: make_lbp_provider()},
+        )
+
+        self.assertEqual(restored, material)
 
 
 if __name__ == "__main__":

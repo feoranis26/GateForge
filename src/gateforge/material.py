@@ -93,9 +93,31 @@ class MaterialNet:
 
 
 @dataclass(frozen=True, slots=True)
+class MaterialModulePort:
+    name: str
+    bit: int
+    direction: PortDirection
+    net: MaterialNetId | None
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialModuleOccurrence:
+    path: str
+    module: str
+    implementation: str
+    parent: str | None
+    instance: str | None
+    anchor: str | None
+    ports: tuple[MaterialModulePort, ...]
+    objects: tuple[MaterialObjectId, ...]
+    children: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class MaterialDesign:
     objects: tuple[MaterialObject, ...]
     nets: tuple[MaterialNet, ...]
+    modules: tuple[MaterialModuleOccurrence, ...] = ()
 
     def __post_init__(self) -> None:
         if not all(isinstance(item, MaterialObject) for item in self.objects):
@@ -104,15 +126,19 @@ class MaterialDesign:
             raise TypeError("Material design nets must be MaterialNet values")
         objects = tuple(sorted(self.objects, key=lambda item: item.identifier.value))
         nets = tuple(sorted(self.nets, key=lambda item: item.identifier.value))
+        modules = tuple(sorted(self.modules, key=lambda item: item.path))
         if len({item.identifier for item in objects}) != len(objects):
             raise MaterialValidationError("Material design has duplicate object IDs")
         if len({item.identifier for item in nets}) != len(nets):
             raise MaterialValidationError("Material design has duplicate net IDs")
+        if len({item.path for item in modules}) != len(modules):
+            raise MaterialValidationError("Material design has duplicate module paths")
         object.__setattr__(self, "objects", objects)
         object.__setattr__(self, "nets", nets)
+        object.__setattr__(self, "modules", modules)
 
     def canonical_data(self) -> dict[str, object]:
-        return {
+        data: dict[str, object] = {
             "schema_version": MATERIAL_SCHEMA_VERSION,
             "objects": [
                 _material_object_data(item)
@@ -130,6 +156,9 @@ class MaterialDesign:
                 for net in self.nets
             ],
         }
+        if self.modules:
+            data["modules"] = [_module_data(item) for item in self.modules]
+        return data
 
     def canonical_bytes(self) -> bytes:
         return json.dumps(
@@ -149,7 +178,12 @@ class MaterialDesign:
         providers: Mapping[str, TargetProvider],
     ) -> "MaterialDesign":
         data = _require_mapping(value, "material design")
-        _require_keys(data, {"schema_version", "objects", "nets"}, set(), "material design")
+        _require_keys(
+            data,
+            {"schema_version", "objects", "nets"},
+            {"modules"},
+            "material design",
+        )
         version = _require_int(data.get("schema_version"), "material schema version")
         if version != MATERIAL_SCHEMA_VERSION:
             raise MaterialValidationError(
@@ -244,7 +278,15 @@ class MaterialDesign:
                 )
             nets.append(material_net)
 
-        design = cls(tuple(objects), tuple(nets))
+        modules = tuple(
+            _decode_module_occurrence(item)
+            for item in (
+                _require_list(data.get("modules"), "material modules")
+                if "modules" in data
+                else []
+            )
+        )
+        design = cls(tuple(objects), tuple(nets), modules)
         validate_material_design(design, providers)
         return design
 
@@ -261,6 +303,100 @@ def _material_object_data(item: MaterialObject) -> dict[str, object]:
     if not item.configuration.is_empty:
         data["configuration"] = item.configuration.canonical_data()
     return data
+
+
+def _module_data(item: MaterialModuleOccurrence) -> dict[str, object]:
+    return {
+        "path": item.path,
+        "module": item.module,
+        "implementation": item.implementation,
+        "parent": item.parent,
+        "instance": item.instance,
+        "anchor": item.anchor,
+        "ports": [
+            {
+                "name": port.name,
+                "bit": port.bit,
+                "direction": port.direction.value,
+                "net": port.net.value if port.net is not None else None,
+            }
+            for port in item.ports
+        ],
+        "objects": [identifier.value for identifier in item.objects],
+        "children": list(item.children),
+    }
+
+
+def _decode_module_occurrence(value: object) -> MaterialModuleOccurrence:
+    data = _require_mapping(value, "material module")
+    _require_keys(
+        data,
+        {
+            "path",
+            "module",
+            "implementation",
+            "parent",
+            "instance",
+            "anchor",
+            "ports",
+            "objects",
+            "children",
+        },
+        set(),
+        "material module",
+    )
+    parent = data.get("parent")
+    instance = data.get("instance")
+    anchor = data.get("anchor")
+    if parent is not None and not isinstance(parent, str):
+        raise MaterialValidationError("Material module parent must be a string or null")
+    if instance is not None and not isinstance(instance, str):
+        raise MaterialValidationError("Material module instance must be a string or null")
+    if anchor is not None and not isinstance(anchor, str):
+        raise MaterialValidationError("Material module anchor must be a string or null")
+    ports: list[MaterialModulePort] = []
+    for raw_port in _require_list(data.get("ports"), "material module ports"):
+        port = _require_mapping(raw_port, "material module port")
+        _require_keys(
+            port,
+            {"name", "bit", "direction", "net"},
+            set(),
+            "material module port",
+        )
+        net = port.get("net")
+        ports.append(
+            MaterialModulePort(
+                name=_require_nonempty_str(port.get("name"), "module port name"),
+                bit=_require_nonnegative_int(port.get("bit"), "module port bit"),
+                direction=PortDirection(
+                    _require_nonempty_str(port.get("direction"), "module port direction")
+                ),
+                net=(
+                    MaterialNetId(_require_digest(net, "module port net"))
+                    if net is not None
+                    else None
+                ),
+            )
+        )
+    return MaterialModuleOccurrence(
+        path=_require_nonempty_str(data.get("path"), "material module path"),
+        module=_require_nonempty_str(data.get("module"), "material module name"),
+        implementation=_require_nonempty_str(
+            data.get("implementation"), "material module implementation"
+        ),
+        parent=parent,
+        instance=instance,
+        anchor=anchor,
+        ports=tuple(ports),
+        objects=tuple(
+            MaterialObjectId(_require_digest(item, "module object ID"))
+            for item in _require_list(data.get("objects"), "module objects")
+        ),
+        children=tuple(
+            _require_nonempty_str(item, "module child path")
+            for item in _require_list(data.get("children"), "module children")
+        ),
+    )
 
 
 def _material_attachment_data(
@@ -380,6 +516,7 @@ def validate_material_design(
             ) from error
 
     objects = {item.identifier: item for item in design.objects}
+    nets_by_id = {item.identifier: item for item in design.nets}
     for item in design.objects:
         expected = make_material_object_id(item.occurrence, item.prefab, item.role)
         if item.identifier != expected:
@@ -393,6 +530,73 @@ def validate_material_design(
             provider.validate_object_configuration(item.type, item.configuration)
         except PrefabValidationError as error:
             raise MaterialValidationError(str(error)) from error
+
+    if design.modules:
+        modules = {item.path: item for item in design.modules}
+        roots = [item for item in design.modules if item.parent is None]
+        if len(roots) != 1:
+            raise MaterialValidationError(
+                f"Material hierarchy requires one root, found {len(roots)}"
+            )
+        assigned_objects: set[MaterialObjectId] = set()
+        for module in design.modules:
+            if not module.path or not module.module or not module.implementation:
+                raise MaterialValidationError("Material module names must not be empty")
+            if module.parent is not None:
+                try:
+                    parent = modules[module.parent]
+                except KeyError as error:
+                    raise MaterialValidationError(
+                        f"Material module {module.path!r} has missing parent "
+                        f"{module.parent!r}"
+                    ) from error
+                if module.path not in parent.children:
+                    raise MaterialValidationError(
+                        f"Material module {module.path!r} is absent from its parent"
+                    )
+            for child in module.children:
+                try:
+                    child_module = modules[child]
+                except KeyError as error:
+                    raise MaterialValidationError(
+                        f"Material module {module.path!r} has missing child {child!r}"
+                    ) from error
+                if child_module.parent != module.path:
+                    raise MaterialValidationError(
+                        f"Material module child {child!r} has inconsistent parent"
+                    )
+            seen_ports: set[tuple[str, int]] = set()
+            for port in module.ports:
+                if not port.name or port.bit < 0:
+                    raise MaterialValidationError(
+                        f"Material module {module.path!r} has invalid port {port}"
+                    )
+                key = (port.name, port.bit)
+                if key in seen_ports:
+                    raise MaterialValidationError(
+                        f"Material module {module.path!r} has duplicate port {key!r}"
+                    )
+                seen_ports.add(key)
+                if port.net is not None and port.net not in nets_by_id:
+                    raise MaterialValidationError(
+                        f"Material module {module.path!r} port {key!r} refers to "
+                        f"missing net {port.net.value}"
+                    )
+            for identifier in module.objects:
+                if identifier not in objects:
+                    raise MaterialValidationError(
+                        f"Material module {module.path!r} refers to missing object "
+                        f"{identifier.value}"
+                    )
+                if identifier in assigned_objects:
+                    raise MaterialValidationError(
+                        f"Material object {identifier.value} belongs to multiple modules"
+                    )
+                assigned_objects.add(identifier)
+        if assigned_objects != set(objects):
+            raise MaterialValidationError(
+                "Material hierarchy does not assign every material object"
+            )
 
     used_endpoints: set[MaterialObjectPortRef | MaterialModulePortRef] = set()
     for net in design.nets:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import heapq
 import math
@@ -24,13 +25,16 @@ from gateforge.placement.model import (
     Placer,
     ResolvedPlacements,
 )
+from gateforge.provider import TargetProvider
 from gateforge.target import PortDirection
 
 
 @dataclass(frozen=True, slots=True)
 class TopologicalPlacementOptions:
-    column_pitch: float = 262.5
-    row_pitch: float = 262.5
+    column_pitch: float = 210.0
+    row_pitch: float = 105.0
+    routing_group_size: int = 5
+    routing_gap_rows: int = 1
 
     def __post_init__(self) -> None:
         for attribute in ("column_pitch", "row_pitch"):
@@ -41,6 +45,18 @@ class TopologicalPlacementOptions:
             if not math.isfinite(normalized) or normalized <= 0:
                 raise PlacementError(f"{attribute} must be finite and positive")
             object.__setattr__(self, attribute, normalized)
+        if (
+            not isinstance(self.routing_group_size, int)
+            or isinstance(self.routing_group_size, bool)
+            or self.routing_group_size <= 0
+        ):
+            raise PlacementError("routing_group_size must be a positive integer")
+        if (
+            not isinstance(self.routing_gap_rows, int)
+            or isinstance(self.routing_gap_rows, bool)
+            or self.routing_gap_rows < 0
+        ):
+            raise PlacementError("routing_gap_rows must be a nonnegative integer")
 
 
 class TopologicalPlacer(Placer):
@@ -50,8 +66,10 @@ class TopologicalPlacer(Placer):
     def __init__(
         self,
         options: TopologicalPlacementOptions = TopologicalPlacementOptions(),
+        providers: Mapping[str, TargetProvider] | None = None,
     ) -> None:
         self.options = options
+        self.providers = providers or {}
 
     def place(self, graph: MaterialGraph) -> PlacementProposal:
         if not graph.subjects:
@@ -68,7 +86,12 @@ class TopologicalPlacer(Placer):
             )
 
         columns = _assign_columns(graph)
-        coordinates = _assign_coordinates(graph, columns, self.options)
+        coordinates = _assign_coordinates(
+            graph,
+            columns,
+            self.options,
+            self.providers,
+        )
         _validate_dependency_order(graph, coordinates)
         resolved = _resolved_placements(coordinates)
         return FlatPlacementProposal(
@@ -80,6 +103,8 @@ class TopologicalPlacer(Placer):
                     {
                         "column_pitch": self.options.column_pitch,
                         "row_pitch": self.options.row_pitch,
+                        "routing_group_size": self.options.routing_group_size,
+                        "routing_gap_rows": self.options.routing_gap_rows,
                     }
                 ),
             ),
@@ -238,13 +263,15 @@ def _assign_coordinates(
     graph: MaterialGraph,
     columns: dict[MaterialSubject, float],
     options: TopologicalPlacementOptions,
+    providers: Mapping[str, TargetProvider],
 ) -> dict[MaterialSubject, tuple[float, float]]:
     grouped: dict[float, list[MaterialSubject]] = {}
     for subject, column in columns.items():
         grouped.setdefault(column, []).append(subject)
 
-    object_y: dict[ObjectSubject, float] = {}
-    coordinates: dict[MaterialSubject, tuple[float, float]] = {}
+    ordered_objects: dict[float, list[ObjectSubject]] = {}
+    object_spans: dict[float, list[int]] = {}
+    terminal_counts: dict[float, int] = {}
     for column in sorted(grouped):
         objects = [
             subject
@@ -252,8 +279,33 @@ def _assign_coordinates(
             if isinstance(subject, ObjectSubject)
         ]
         objects.sort(key=lambda subject: _object_order_key(graph, subject))
-        for index, subject in enumerate(objects):
-            y = (index - (len(objects) - 1) / 2) * options.row_pitch
+        ordered_objects[column] = objects
+        object_spans[column] = [
+            _object_row_span(graph, subject, options, providers)
+            for subject in objects
+        ]
+        terminal_counts[column] = sum(
+            not isinstance(subject, ObjectSubject) for subject in grouped[column]
+        )
+
+    content_height = _content_height(
+        [*object_spans.values()],
+        [[1] * count for count in terminal_counts.values()],
+        routing_group_size=options.routing_group_size,
+    )
+
+    object_y: dict[ObjectSubject, float] = {}
+    coordinates: dict[MaterialSubject, tuple[float, float]] = {}
+    for column in sorted(grouped):
+        objects = ordered_objects[column]
+        centers, _ = _pack_row_spans(
+            object_spans[column],
+            content_height,
+            options.routing_group_size,
+            options.routing_gap_rows,
+        )
+        for subject, center in zip(objects, centers):
+            y = center * options.row_pitch
             object_y[subject] = y
             coordinates[subject] = (column * options.column_pitch, y)
 
@@ -264,14 +316,104 @@ def _assign_coordinates(
             if not isinstance(subject, ObjectSubject)
         ]
         terminals.sort(key=lambda subject: _terminal_order_key(graph, subject, object_y))
-        for index, subject in enumerate(terminals):
-            y = (index - (len(terminals) - 1) / 2) * options.row_pitch
+        centers, _ = _pack_row_spans(
+            [1] * len(terminals),
+            content_height,
+            options.routing_group_size,
+            options.routing_gap_rows,
+        )
+        for subject, center in zip(terminals, centers):
+            y = center * options.row_pitch
             coordinates[subject] = (column * options.column_pitch, y)
 
     min_x = min(x for x, _ in coordinates.values())
     max_x = max(x for x, _ in coordinates.values())
-    offset = (min_x + max_x) / 2
-    return {subject: (x - offset, y) for subject, (x, y) in coordinates.items()}
+    min_y = min(y for _, y in coordinates.values())
+    max_y = max(y for _, y in coordinates.values())
+    x_offset = (min_x + max_x) / 2
+    y_offset = (min_y + max_y) / 2
+    return {
+        subject: (x - x_offset, y - y_offset)
+        for subject, (x, y) in coordinates.items()
+    }
+
+
+def _object_row_span(
+    graph: MaterialGraph,
+    subject: ObjectSubject,
+    options: TopologicalPlacementOptions,
+    providers: Mapping[str, TargetProvider],
+) -> int:
+    material_object = next(
+        item for item in graph.design.objects if item.identifier == subject.object
+    )
+    provider = providers.get(material_object.type.provider)
+    if provider is None:
+        return 1
+    geometry = provider.object_placement_geometry(material_object)
+    if geometry is None:
+        return 1
+    return max(1, math.ceil(geometry.height / options.row_pitch - 1e-12))
+
+
+def _content_height(
+    *span_groups: list[list[int]],
+    routing_group_size: int,
+) -> int:
+    spans_by_column = [spans for group in span_groups for spans in group]
+    height = max((sum(spans) for spans in spans_by_column), default=1)
+    while True:
+        required = max(
+            (
+                _pack_row_spans(
+                    spans,
+                    height,
+                    routing_group_size,
+                    0,
+                )[1]
+                for spans in spans_by_column
+            ),
+            default=height,
+        )
+        if required <= height:
+            return height
+        height = required
+
+
+def _pack_row_spans(
+    spans: list[int],
+    content_height: int,
+    routing_group_size: int,
+    routing_gap_rows: int,
+) -> tuple[list[float], int]:
+    if not spans:
+        return [], 0
+    cursor = max(0, (content_height - sum(spans)) // 2)
+    centers: list[float] = []
+    for span in spans:
+        if span <= routing_group_size:
+            offset = cursor % routing_group_size
+            if offset + span > routing_group_size:
+                cursor += routing_group_size - offset
+        start = cursor
+        end = cursor + span - 1
+        centers.append(
+            (
+                _physical_row(start, routing_group_size, routing_gap_rows)
+                + _physical_row(end, routing_group_size, routing_gap_rows)
+            )
+            / 2
+        )
+        cursor += span
+    return centers, cursor
+
+
+def _physical_row(
+    content_row: int,
+    routing_group_size: int,
+    routing_gap_rows: int,
+) -> int:
+    return content_row + (content_row // routing_group_size) * routing_gap_rows
 
 
 def _object_order_key(

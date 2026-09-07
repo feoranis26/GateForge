@@ -11,13 +11,25 @@ from gateforge.providers.lbp.objects import (
     LBPTypeRegistry,
     validate_lbp_prefab,
 )
+from gateforge.providers.lbp.configuration import (
+    LBPCounterConfiguration,
+    LBPRandomizerConfiguration,
+    LBPRandomizerInputAction,
+    LBPRandomizerMode,
+    LBPTimerConfiguration,
+    LBPTimerMode,
+)
 from gateforge.providers.lbp.types import (
     LBPAndGateType,
+        LBPCounterType,
     LBPCombinatorialVariableWidthGateType,
     LBPGateType,
     LBPNotGateType,
     LBPOrGateType,
+    LBPRandomizerType,
+    LBPSelectorType,
     LBPXorGateType,
+    LBPTimerType,
     decode_lbp_object_type,
 )
 from gateforge.target import (
@@ -94,6 +106,88 @@ class LBPObjectTypeTests(unittest.TestCase):
         self.assertEqual(LBPOrGateType.TYPE_KEY, "OR")
         self.assertEqual(LBPNotGateType.TYPE_KEY, "NOT")
         self.assertEqual(LBPXorGateType.TYPE_KEY, "XOR")
+        self.assertEqual(LBPTimerType.TYPE_KEY, "TIMER")
+
+    def test_timer_type_and_configuration_round_trip(self) -> None:
+        from gateforge.providers.lbp.objects import make_lbp_provider
+
+        timer_type = LBPTimerType()
+        provider = make_lbp_provider()
+        value = LBPTimerConfiguration(50, LBPTimerMode.START_COUNT_UP)
+
+        restored_type = decode_lbp_object_type(timer_type.get_type())
+        configuration = provider.encode_object_configuration(
+            timer_type.get_type(),
+            value,
+        )
+
+        self.assertIsInstance(restored_type, LBPTimerType)
+        self.assertEqual(
+            {port.name for port in restored_type.get_schema().ports},
+            {"IN_0", "IN_1", "OUT"},
+        )
+        self.assertEqual(
+            restored_type.get_placement_geometry(),
+            timer_type.get_placement_geometry(),
+        )
+        self.assertEqual(
+            provider.decode_object_configuration(timer_type.get_type(), configuration),
+            value,
+        )
+        self.assertEqual(value.duration_frames, 149)
+
+    def test_dynamic_intrinsic_types_and_configurations_round_trip(self) -> None:
+        from gateforge.providers.lbp.objects import make_lbp_provider
+
+        provider = make_lbp_provider()
+        counter = LBPCounterType()
+        randomizer = LBPRandomizerType(outputs=3)
+        selector = LBPSelectorType(width=3)
+        counter_value = LBPCounterConfiguration(20)
+        randomizer_value = LBPRandomizerConfiguration(
+            mode=LBPRandomizerMode.TOGGLE,
+            input_action=LBPRandomizerInputAction.OVERRIDE_PATTERN,
+            new_pick=True,
+            on_min_ds=10,
+            on_max_ds=20,
+            off_min_ds=0,
+            off_max_ds=0,
+        )
+
+        self.assertIsInstance(
+            decode_lbp_object_type(counter.get_type()),
+            LBPCounterType,
+        )
+        self.assertEqual(
+            decode_lbp_object_type(randomizer.get_type()).outputs,
+            3,
+        )
+        self.assertEqual(
+            decode_lbp_object_type(selector.get_type()).width,
+            3,
+        )
+        self.assertEqual(
+            provider.decode_object_configuration(
+                counter.get_type(),
+                provider.encode_object_configuration(counter.get_type(), counter_value),
+            ),
+            counter_value,
+        )
+        self.assertEqual(
+            provider.decode_object_configuration(
+                randomizer.get_type(),
+                provider.encode_object_configuration(
+                    randomizer.get_type(), randomizer_value
+                ),
+            ),
+            randomizer_value,
+        )
+        self.assertIsNone(
+            provider.decode_object_configuration(
+                selector.get_type(),
+                ProviderConfiguration(),
+            )
+        )
 
     def test_all_leaf_identifiers_round_trip_exactly(self) -> None:
         cases = (

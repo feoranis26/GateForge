@@ -1,4 +1,9 @@
-from gateforge.mapping import BoundaryBinding, MappingProposal, MappingProvider
+from gateforge.mapping import (
+    BoundaryBinding,
+    MappingCostEstimate,
+    MappingProposal,
+    MappingProvider,
+)
 from gateforge.providers.lbp.common import (
     LBP_LOGIC,
     LBP_PROVIDER,
@@ -50,6 +55,7 @@ class LBPCombinatorialLowLevelGateMapper(MappingProvider):
             "$_ANDNOT_",
             "$_NAND_",
             "$_OR_",
+            "$_ORNOT_",
             "$_NOR_",
             "$_NOT_",
             "$_BUF_",
@@ -105,15 +111,17 @@ class LBPCombinatorialLowLevelGateMapper(MappingProvider):
             ),
         )
 
-    def _andnot_prefab(self) -> SemanticPrefab:
+    def _inverted_b_prefab(
+        self,
+        gate_type: LBPCombinatorialVariableWidthGateType,
+    ) -> SemanticPrefab:
         not_gate = LBPNotGateType(width=1, invert=False)
-        and_gate = LBPAndGateType(width=2, invert=False)
         return SemanticPrefab(
             provider=self.provider,
             objects=frozenset(
                 {
                     PrefabObject("invert_b", not_gate.get_type()),
-                    PrefabObject("result", and_gate.get_type()),
+                    PrefabObject("result", gate_type.get_type()),
                 }
             ),
             ports=frozenset(
@@ -166,7 +174,9 @@ class LBPCombinatorialLowLevelGateMapper(MappingProvider):
                 LBPAndGateType(width=2, invert=False), _BINARY_PORT_BINDINGS
             )
         if cell_type == "$_ANDNOT_":
-            return self._andnot_prefab()
+            return self._inverted_b_prefab(
+                LBPAndGateType(width=2, invert=False)
+            )
         if cell_type == "$_NAND_":
             return self._single_gate_prefab(
                 LBPAndGateType(width=2, invert=True), _BINARY_PORT_BINDINGS
@@ -174,6 +184,10 @@ class LBPCombinatorialLowLevelGateMapper(MappingProvider):
         if cell_type == "$_OR_":
             return self._single_gate_prefab(
                 LBPOrGateType(width=2, invert=False), _BINARY_PORT_BINDINGS
+            )
+        if cell_type == "$_ORNOT_":
+            return self._inverted_b_prefab(
+                LBPOrGateType(width=2, invert=False)
             )
         if cell_type == "$_NOR_":
             return self._single_gate_prefab(
@@ -217,6 +231,10 @@ class LBPCombinatorialLowLevelGateMapper(MappingProvider):
             ids=frozenset({cell.identifier}),
             prefab=prefab,
             boundary=boundary,
+            cost=MappingCostEstimate(
+                float(len(prefab.objects)),
+                float(len(prefab.objects)),
+            ),
         )
 
     def map(self, design: DesignSnapshot) -> list[MappingProposal]:

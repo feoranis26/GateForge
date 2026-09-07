@@ -10,6 +10,7 @@ from gateforge.material import (
 )
 from gateforge.provider import ProjectedDependency, TargetProvider
 from gateforge.providers.lbp.common import LBP_LOGIC, LBP_PROVIDER, LBP_WIRE
+from gateforge.providers.lbp.configuration import LBPObjectConfigurationCodec
 from gateforge.providers.lbp.types import decode_lbp_object_type
 from gateforge.target import (
     NetworkTypeSchema,
@@ -139,5 +140,9 @@ def make_lbp_provider() -> TargetProvider:
         registry=LBPTypeRegistry(),
         validator=validate_lbp_prefab,
         material_validator=validate_lbp_material_net,
+        object_configuration_codec=LBPObjectConfigurationCodec(),
         dependency_projector=project_lbp_material_dependencies,
+        object_geometry_resolver=lambda material_object, registry: (
+            decode_lbp_object_type(material_object.type).get_placement_geometry()
+        ),
     )
