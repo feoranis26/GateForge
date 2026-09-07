@@ -3,7 +3,11 @@ from dataclasses import dataclass
 import unittest
 
 from gateforge.material import (
+    ImplementationPackaging,
     MaterialDesign,
+    MaterialImplementationOccurrence,
+    MaterialImplementationPort,
+    MaterialModuleOccurrence,
     MaterialModulePortRef,
     MaterialNet,
     MaterialNetId,
@@ -138,6 +142,79 @@ class MaterialDesignTests(unittest.TestCase):
         self.assertEqual(restored, self.design)
         self.assertEqual(restored.canonical_bytes(), self.design.canonical_bytes())
         self.assertEqual(restored.get_digest(), self.design.get_digest())
+
+    def test_generated_implementation_round_trips(self) -> None:
+        material_object = self.design.objects[0]
+        input_net = next(
+            net
+            for net in self.design.nets
+            if any(
+                isinstance(attachment, MaterialObjectPortRef)
+                and attachment.port == "IN_0"
+                for attachment in net.attachments
+            )
+        )
+        output_net = next(
+            net
+            for net in self.design.nets
+            if any(
+                isinstance(attachment, MaterialObjectPortRef)
+                and attachment.port == "OUT"
+                for attachment in net.attachments
+            )
+        )
+        implementation = MaterialImplementationOccurrence(
+            path=f"module:test/implementation:{material_object.occurrence.value}",
+            occurrence=material_object.occurrence,
+            owner_module="module:test",
+            prefab=material_object.prefab,
+            provider=LBP_PROVIDER,
+            mapper="test.mapper",
+            rule="test-rule",
+            name="test implementation",
+            packaging=ImplementationPackaging.CONTAINER,
+            ports=(
+                MaterialImplementationPort(
+                    "A", 0, PortDirection.INPUT, input_net.identifier
+                ),
+                MaterialImplementationPort(
+                    "Y", 0, PortDirection.OUTPUT, output_net.identifier
+                ),
+            ),
+            objects=(material_object.identifier,),
+        )
+        module = MaterialModuleOccurrence(
+            path="module:test",
+            module="test",
+            implementation="test",
+            parent=None,
+            instance=None,
+            anchor=None,
+            ports=(),
+            objects=(material_object.identifier,),
+            children=(),
+        )
+        design = MaterialDesign(
+            self.design.objects,
+            self.design.nets,
+            (module,),
+            (implementation,),
+        )
+
+        restored = MaterialDesign.from_canonical_data(
+            design.canonical_data(),
+            self.providers,
+        )
+
+        self.assertEqual(restored, design)
+
+    def test_schema_one_material_remains_readable(self) -> None:
+        legacy = self.design.canonical_data()
+        legacy["schema_version"] = 1
+
+        restored = MaterialDesign.from_canonical_data(legacy, self.providers)
+
+        self.assertEqual(restored, self.design)
 
     def test_decoder_normalizes_array_order(self) -> None:
         data = self.design.canonical_data()

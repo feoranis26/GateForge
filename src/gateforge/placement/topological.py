@@ -74,25 +74,15 @@ class TopologicalPlacer(Placer):
     def place(self, graph: MaterialGraph) -> PlacementProposal:
         if not graph.subjects:
             raise PlacementError("Topological placer requires at least one subject")
-        cycles = _cyclic_components(graph)
-        if cycles:
-            details = "; ".join(
-                ", ".join(repr(subject) for subject in component)
-                for component in cycles
-            )
-            raise PlacementError(
-                f"Topological placer requires an acyclic dependency graph; "
-                f"cyclic components: {details}"
-            )
-
-        columns = _assign_columns(graph)
+        components = _object_components(graph)
+        columns = _assign_columns(graph, components)
         coordinates = _assign_coordinates(
             graph,
             columns,
             self.options,
             self.providers,
         )
-        _validate_dependency_order(graph, coordinates)
+        _validate_dependency_order(graph, coordinates, components)
         resolved = _resolved_placements(coordinates)
         return FlatPlacementProposal(
             source_digest=graph.design.get_digest(),
@@ -112,12 +102,16 @@ class TopologicalPlacer(Placer):
         )
 
 
-def _cyclic_components(
+def _object_components(
     graph: MaterialGraph,
 ) -> tuple[tuple[MaterialSubject, ...], ...]:
+    object_subjects = tuple(
+        subject for subject in graph.subjects if isinstance(subject, ObjectSubject)
+    )
+    object_set = frozenset(object_subjects)
     visited: set[MaterialSubject] = set()
     finished: list[MaterialSubject] = []
-    for root in graph.subjects:
+    for root in object_subjects:
         if root in visited:
             continue
         stack: list[tuple[MaterialSubject, bool]] = [(root, False)]
@@ -131,13 +125,16 @@ def _cyclic_components(
             visited.add(subject)
             stack.append((subject, True))
             for successor in reversed(
-                sorted(graph.successors[subject], key=material_subject_key)
+                sorted(
+                    graph.successors[subject] & object_set,
+                    key=material_subject_key,
+                )
             ):
                 if successor not in visited:
                     stack.append((successor, False))
 
     assigned: set[MaterialSubject] = set()
-    cyclic: list[tuple[MaterialSubject, ...]] = []
+    components: list[tuple[MaterialSubject, ...]] = []
     for root in reversed(finished):
         if root in assigned:
             continue
@@ -148,59 +145,75 @@ def _cyclic_components(
             subject = stack.pop()
             component.add(subject)
             for predecessor in sorted(
-                graph.predecessors[subject],
+                graph.predecessors[subject] & object_set,
                 key=material_subject_key,
                 reverse=True,
             ):
                 if predecessor not in assigned:
                     assigned.add(predecessor)
                     stack.append(predecessor)
-        if len(component) > 1 or root in graph.successors[root]:
-            cyclic.append(tuple(sorted(component, key=material_subject_key)))
-    return tuple(sorted(cyclic, key=lambda item: material_subject_key(item[0])))
+        components.append(tuple(sorted(component, key=material_subject_key)))
+    return tuple(
+        sorted(components, key=lambda item: material_subject_key(item[0]))
+    )
 
 
-def _assign_columns(graph: MaterialGraph) -> dict[MaterialSubject, float]:
+def _assign_columns(
+    graph: MaterialGraph,
+    components: tuple[tuple[MaterialSubject, ...], ...],
+) -> dict[MaterialSubject, float]:
     object_subjects = tuple(
         subject for subject in graph.subjects if isinstance(subject, ObjectSubject)
     )
     object_set = frozenset(object_subjects)
-    object_predecessors = {
-        subject: graph.predecessors[subject] & object_set
-        for subject in object_subjects
+    component_by_subject = {
+        subject: index
+        for index, component in enumerate(components)
+        for subject in component
     }
-    object_successors = {
-        subject: graph.successors[subject] & object_set
-        for subject in object_subjects
+    component_predecessors: dict[int, set[int]] = {
+        index: set() for index in range(len(components))
     }
+    component_successors: dict[int, set[int]] = {
+        index: set() for index in range(len(components))
+    }
+    for subject in object_subjects:
+        source_component = component_by_subject[subject]
+        for successor in graph.successors[subject] & object_set:
+            target_component = component_by_subject[successor]
+            if source_component == target_component:
+                continue
+            component_successors[source_component].add(target_component)
+            component_predecessors[target_component].add(source_component)
 
-    reverse_depth: dict[ObjectSubject, int] = {}
-    if object_subjects:
+    reverse_depth: dict[int, int] = {}
+    if components:
         indegree = {
-            subject: len(object_predecessors[subject]) for subject in object_subjects
+            index: len(component_predecessors[index])
+            for index in range(len(components))
         }
         ready = [
-            (material_subject_key(subject), subject)
-            for subject in object_subjects
-            if indegree[subject] == 0
+            (material_subject_key(components[index][0]), index)
+            for index in range(len(components))
+            if indegree[index] == 0
         ]
         heapq.heapify(ready)
-        ordered: list[ObjectSubject] = []
+        ordered: list[int] = []
         while ready:
-            _, subject = heapq.heappop(ready)
-            ordered.append(subject)
-            for successor in object_successors[subject]:
+            _, component = heapq.heappop(ready)
+            ordered.append(component)
+            for successor in component_successors[component]:
                 indegree[successor] -= 1
                 if indegree[successor] == 0:
                     heapq.heappush(
                         ready,
-                        (material_subject_key(successor), successor),
+                        (material_subject_key(components[successor][0]), successor),
                     )
-        if len(ordered) != len(object_subjects):
-            raise PlacementError("Object dependency graph is cyclic")
-        for subject in reversed(ordered):
-            successors = object_successors[subject]
-            reverse_depth[subject] = (
+        if len(ordered) != len(components):
+            raise AssertionError("SCC condensation graph is cyclic")
+        for component in reversed(ordered):
+            successors = component_successors[component]
+            reverse_depth[component] = (
                 0
                 if not successors
                 else 1 + max(reverse_depth[item] for item in successors)
@@ -208,9 +221,9 @@ def _assign_columns(graph: MaterialGraph) -> dict[MaterialSubject, float]:
 
     object_span = max(reverse_depth.values(), default=0)
     columns: dict[MaterialSubject, float] = {}
-    for subject in object_subjects:
-        predecessors = object_predecessors[subject]
-        successors = object_successors[subject]
+    for component, subjects in enumerate(components):
+        predecessors = component_predecessors[component]
+        successors = component_successors[component]
         if not predecessors and not successors:
             column = object_span / 2
         elif not predecessors:
@@ -218,8 +231,9 @@ def _assign_columns(graph: MaterialGraph) -> dict[MaterialSubject, float]:
         elif not successors:
             column = float(object_span)
         else:
-            column = float(object_span - reverse_depth[subject])
-        columns[subject] = column
+            column = float(object_span - reverse_depth[component])
+        for subject in subjects:
+            columns[subject] = column
 
     left_terminals: list[MaterialSubject] = []
     right_terminals: list[MaterialSubject] = []
@@ -451,9 +465,21 @@ def _terminal_order_key(
 def _validate_dependency_order(
     graph: MaterialGraph,
     coordinates: dict[MaterialSubject, tuple[float, float]],
+    components: tuple[tuple[MaterialSubject, ...], ...],
 ) -> None:
+    component_by_subject = {
+        subject: index
+        for index, component in enumerate(components)
+        for subject in component
+    }
     for source, successors in graph.successors.items():
         for target in successors:
+            if (
+                isinstance(source, ObjectSubject)
+                and isinstance(target, ObjectSubject)
+                and component_by_subject[source] == component_by_subject[target]
+            ):
+                continue
             if coordinates[source][0] >= coordinates[target][0]:
                 raise PlacementError(
                     f"Topological columns do not place {source} before {target}"

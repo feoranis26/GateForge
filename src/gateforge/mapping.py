@@ -6,6 +6,7 @@ import json
 import math
 from typing import Sequence
 
+from gateforge.material import ImplementationPackaging
 from gateforge.source import (
     BoundarySource,
     CellIdentifier,
@@ -85,6 +86,8 @@ class MappingProposal:
     score: int = 0
     disposition: MappingDisposition = MappingDisposition.SPECULATIVE
     cost: MappingCostEstimate = field(default_factory=MappingCostEstimate)
+    implementation_name: str = ""
+    packaging: ImplementationPackaging = ImplementationPackaging.AUTO
 
     def fingerprint(self) -> str:
         data = {
@@ -102,6 +105,8 @@ class MappingProposal:
                 for item in sorted(self.ids)
             ],
             "prefab": self.prefab.get_id().value,
+            "implementation_name": self.implementation_name,
+            "packaging": self.packaging.value,
             "boundary": sorted(
                 (
                     {
@@ -124,6 +129,7 @@ class MappingProposal:
 
 class MappingProvider(ABC):
     provider: str
+    stages: frozenset[str] | None = None
 
     @abstractmethod
     def map(self, design: DesignSnapshot) -> Sequence[MappingProposal]:
@@ -299,17 +305,32 @@ class Mapper:
     def collect_proposals(
         self,
         design: DesignSnapshot,
+        stage: str | None = None,
     ) -> tuple[MappingProposal, ...]:
         proposals = tuple(
             proposal
             for mapper in self.mappers
+            if stage is None or mapper.stages is None or stage in mapper.stages
             for proposal in mapper.map(design)
         )
         self._validate_proposals(proposals, design.revision)
         return tuple(sorted(proposals, key=MappingProposal.fingerprint))
 
-    def conflict_graph(self, design: DesignSnapshot) -> ProposalConflictGraph:
-        return ProposalConflictGraph.from_proposals(self.collect_proposals(design))
+    def conflict_graph(
+        self,
+        design: DesignSnapshot,
+        stage: str | None = None,
+    ) -> ProposalConflictGraph:
+        return ProposalConflictGraph.from_proposals(
+            self.collect_proposals(design, stage)
+        )
 
-    def map_design(self, design: DesignSnapshot) -> list[MappingProposal]:
-        return self.combine(self.collect_proposals(design), design.revision)
+    def map_design(
+        self,
+        design: DesignSnapshot,
+        stage: str | None = None,
+    ) -> list[MappingProposal]:
+        return self.combine(
+            self.collect_proposals(design, stage),
+            design.revision,
+        )

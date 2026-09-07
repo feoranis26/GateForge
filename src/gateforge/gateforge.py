@@ -11,6 +11,8 @@ from pyosys import libyosys as ys
 from gateforge.design import DesignContext, export_json
 from gateforge.graph import MaterialGraph
 from gateforge.hierarchy import (
+    GeneratedHierarchyMode,
+    GeneratedHierarchyPolicy,
     PhysicalHierarchyMode,
     PhysicalHierarchyPolicy,
     SynthesisHierarchyMode,
@@ -31,6 +33,11 @@ from gateforge.providers.lbp.common import LBP_PROVIDER
 from gateforge.providers.lbp.hierarchy import containerize_lbp_plan
 from gateforge.providers.lbp.associative import LBPAssociativeConeMapper
 from gateforge.providers.lbp.intrinsics import LBPIntrinsicMapper
+from gateforge.providers.lbp.registers import (
+    LBPCoarseRegisterBankMapper,
+    LBPRegisterStyle,
+    LBPScalarRegisterBankMapper,
+)
 from gateforge.providers.lbp.mappers import LBPCombinatorialLowLevelGateMapper
 from gateforge.providers.lbp.objects import make_lbp_provider
 from gateforge.providers.lbp.realize import realize_lbp_plan
@@ -96,11 +103,7 @@ def compile_source(
     if stages is None:
         stages = default_mapping_stages()
     if mapping_providers is None:
-        mapping_providers = (
-            LBPIntrinsicMapper(),
-            LBPAssociativeConeMapper(),
-            LBPCombinatorialLowLevelGateMapper(),
-        )
+        mapping_providers = _default_mapping_providers()
     if target_providers is None:
         target_providers = {LBP_PROVIDER: make_lbp_provider()}
 
@@ -175,11 +178,7 @@ def compile_material_with_report(
     if stages is None:
         stages = default_mapping_stages()
     if mapping_providers is None:
-        mapping_providers = (
-            LBPIntrinsicMapper(),
-            LBPAssociativeConeMapper(),
-            LBPCombinatorialLowLevelGateMapper(),
-        )
+        mapping_providers = _default_mapping_providers()
     if target_providers is None:
         target_providers = {LBP_PROVIDER: make_lbp_provider()}
     result = _search_source(
@@ -261,6 +260,18 @@ def compile_material_with_report(
 
 def _target_providers() -> dict[str, TargetProvider]:
     return {LBP_PROVIDER: make_lbp_provider()}
+
+
+def _default_mapping_providers(
+    register_style: LBPRegisterStyle = LBPRegisterStyle.COMPACT,
+) -> tuple[MappingProvider, ...]:
+    return (
+        LBPIntrinsicMapper(),
+        LBPCoarseRegisterBankMapper(register_style),
+        LBPScalarRegisterBankMapper(register_style),
+        LBPAssociativeConeMapper(),
+        LBPCombinatorialLowLevelGateMapper(),
+    )
 
 
 def _add_placement_arguments(parser: argparse.ArgumentParser) -> None:
@@ -350,6 +361,9 @@ def _compile_command(args: argparse.Namespace) -> None:
     context, state, material, search_report = compile_material_with_report(
         args.source,
         stages=default_mapping_stages(use_abc=not args.no_abc),
+        mapping_providers=_default_mapping_providers(
+            LBPRegisterStyle(args.register_style)
+        ),
         target_providers=providers,
         synthesis_hierarchy=SynthesisHierarchyPolicy(
             SynthesisHierarchyMode(args.synthesis_hierarchy),
@@ -435,12 +449,14 @@ def _export_lbp_toolkit_command(args: argparse.Namespace) -> None:
         plan,
         material,
         graph,
-        placed,
         PhysicalHierarchyPolicy(
             PhysicalHierarchyMode(args.physical_hierarchy),
             args.hierarchy_threshold,
         ),
         providers,
+        GeneratedHierarchyPolicy(
+            GeneratedHierarchyMode(args.generated_hierarchy),
+        ),
     )
     _write_json(args.output, encode_lbp_toolkit_plan(plan))
     material_gadgets = sum(
@@ -516,6 +532,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Maximum proposal sets generated per candidate and stage.",
     )
     compile_parser.add_argument(
+        "--register-style",
+        choices=tuple(item.value for item in LBPRegisterStyle),
+        default=LBPRegisterStyle.COMPACT.value,
+        help="Choose compact Counter-based or hardened two-phase register banks.",
+    )
+    compile_parser.add_argument(
         "--show",
         action="store_true",
         help="Open the final Yosys graph visualization.",
@@ -582,6 +604,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--hierarchy-threshold",
         type=float,
         help="Threshold used by min-objects or min-cost physical hierarchy.",
+    )
+    toolkit_parser.add_argument(
+        "--generated-hierarchy",
+        choices=tuple(item.value for item in GeneratedHierarchyMode),
+        default=GeneratedHierarchyMode.AUTO.value,
+        help="Choose inline, automatic, or all generated implementation microchips.",
     )
 
     args = parser.parse_args(argv)

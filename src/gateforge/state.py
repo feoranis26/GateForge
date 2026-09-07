@@ -5,10 +5,11 @@ import json
 from types import MappingProxyType
 from typing import Any
 
+from gateforge.material import ImplementationPackaging
 from gateforge.target import PortDirection, PrefabId, PrefabPortRef, SemanticPrefab
 
 
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -37,6 +38,8 @@ class ClaimDefinition:
     rule_version: int
     accepted_revision: int
     source_provenance: tuple[str, ...]
+    implementation_name: str = ""
+    packaging: ImplementationPackaging = ImplementationPackaging.AUTO
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +138,8 @@ class CompilationIntermediateState:
                     "rule_version": claim.rule_version,
                     "accepted_revision": claim.accepted_revision,
                     "source_provenance": list(claim.source_provenance),
+                    "implementation_name": claim.implementation_name,
+                    "packaging": claim.packaging.value,
                 }
                 for claim in sorted(
                     self.claims.values(), key=lambda item: item.identifier.value
@@ -159,7 +164,7 @@ class CompilationIntermediateState:
         value: Mapping[str, Any],
     ) -> "CompilationIntermediateState":
         version = value.get("schema_version")
-        if version != STATE_SCHEMA_VERSION:
+        if version not in {1, STATE_SCHEMA_VERSION}:
             raise ValueError(f"Unsupported state schema version {version!r}")
         revision = value.get("revision")
         if not isinstance(revision, int) or isinstance(revision, bool):
@@ -246,6 +251,18 @@ class CompilationIntermediateState:
                 rule_version=rule_version,
                 accepted_revision=accepted_revision,
                 source_provenance=tuple(source_provenance),
+                implementation_name=(
+                    _required_string(raw_claim, "implementation_name")
+                    if version >= 2
+                    else _required_string(raw_claim, "rule")
+                ),
+                packaging=(
+                    ImplementationPackaging(
+                        _required_string(raw_claim, "packaging")
+                    )
+                    if version >= 2
+                    else ImplementationPackaging.AUTO
+                ),
             )
 
         return cls(

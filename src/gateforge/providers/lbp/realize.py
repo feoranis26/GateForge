@@ -37,6 +37,7 @@ from gateforge.providers.lbp.configuration import (
     LBPRandomizerConfiguration,
     LBPRandomizerInputAction,
     LBPRandomizerMode,
+    LBPSelectorStateConfiguration,
     LBPTimerConfiguration,
     LBPTimerMode,
 )
@@ -47,7 +48,9 @@ from gateforge.providers.lbp.types import (
     LBPNotGateType,
     LBPOrGateType,
     LBPRandomizerType,
+    LBPPhaseSelectorType,
     LBPSelectorType,
+    LBPStorageSelectorType,
     LBPXorGateType,
     LBPTimerType,
     decode_lbp_object_type,
@@ -182,6 +185,28 @@ def realize_lbp_plan(
             settings = LbpSwitchSettings(
                 bullets_required=object_type.width,
                 player_mode=2,
+            )
+        elif isinstance(
+            object_type,
+            (LBPPhaseSelectorType, LBPStorageSelectorType),
+        ):
+            configuration = LBPObjectConfigurationCodec().decode(
+                material_object.type,
+                material_object.configuration,
+            )
+            if not isinstance(configuration, LBPSelectorStateConfiguration):
+                raise LbpPlanRealizationError(
+                    "LBP state Selector has invalid configuration"
+                )
+            kind = LbpGadgetKind.SELECTOR
+            inverted = False
+            arity = 3
+            output_arity = 2
+            scale_x = _GATE_SCALE_X
+            scale_y = _GATE_SCALE_STEP_Y * 2
+            settings = LbpSwitchSettings(
+                bullets_required=2,
+                bullets_detected=configuration.selection,
             )
         elif isinstance(object_type, LBPCombinatorialVariableWidthGateType):
             kind, inverted = _realize_gate_type(object_type)

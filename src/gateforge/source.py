@@ -38,6 +38,21 @@ class YosysParameterValue:
             )
         return self.raw
 
+    def as_binary_bits(
+        self,
+        width: int,
+        *,
+        lsb_first: bool = True,
+    ) -> tuple[int, ...]:
+        if not isinstance(width, int) or isinstance(width, bool) or width <= 0:
+            raise SnapshotError("Yosys parameter width must be positive")
+        if _BINARY_VALUE.fullmatch(self.raw) is None or len(self.raw) != width:
+            raise SnapshotError(
+                f"Yosys parameter {self.raw!r} is not a {width}-bit known value"
+            )
+        bits = tuple(int(character) for character in self.raw)
+        return tuple(reversed(bits)) if lsb_first else bits
+
 
 class ConstantValue(StrEnum):
     ZERO = "0"

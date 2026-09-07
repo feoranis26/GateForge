@@ -1,9 +1,16 @@
+from dataclasses import replace
 from pathlib import Path
 import unittest
 
 from gateforge.gateforge import compile_material
 from gateforge.graph import MaterialGraph
-from gateforge.hierarchy import PhysicalHierarchyMode, PhysicalHierarchyPolicy
+from gateforge.hierarchy import (
+    GeneratedHierarchyMode,
+    GeneratedHierarchyPolicy,
+    PhysicalHierarchyMode,
+    PhysicalHierarchyPolicy,
+)
+from gateforge.material import ImplementationPackaging
 from gateforge.placement import TopologicalPlacer
 from gateforge.providers.lbp.common import LBP_PROVIDER
 from gateforge.providers.lbp.hierarchy import containerize_lbp_plan
@@ -53,7 +60,6 @@ class LbpHierarchyTests(unittest.TestCase):
             self.flat_plan,
             self.material,
             self.graph,
-            self.placed,
             policy,
             self.providers,
         )
@@ -176,6 +182,45 @@ class LbpHierarchyTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(plan.hierarchy)
+
+    def test_generated_container_is_nested_under_flat_source_root(self) -> None:
+        implementation = replace(
+            self.material.implementations[0],
+            packaging=ImplementationPackaging.CONTAINER,
+        )
+        material = replace(
+            self.material,
+            implementations=(implementation, *self.material.implementations[1:]),
+        )
+        graph = MaterialGraph.from_design(material, self.providers)
+        placed = TopologicalPlacer(providers=self.providers).place(graph).finalize(graph)
+        flat_plan = realize_lbp_plan(material, graph, placed)
+
+        plan = containerize_lbp_plan(
+            flat_plan,
+            material,
+            graph,
+            PhysicalHierarchyPolicy(PhysicalHierarchyMode.FLAT),
+            self.providers,
+            GeneratedHierarchyPolicy(GeneratedHierarchyMode.AUTO),
+        )
+
+        hierarchy = plan.hierarchy
+        self.assertIsNotNone(hierarchy)
+        assert hierarchy is not None
+        containers = {item.path: item for item in hierarchy.containers}
+        root = containers["module:test_with_inverters"]
+        generated = containers[implementation.path]
+        self.assertEqual(generated.parent, root.path)
+        self.assertEqual(generated.name, implementation.name)
+        self.assertEqual(set(generated.gadgets), {
+            next(
+                gadget.identifier
+                for gadget in plan.gadgets
+                if gadget.identifier.value.endswith(identifier.value)
+            )
+            for identifier in implementation.objects
+        })
 
 
 if __name__ == "__main__":

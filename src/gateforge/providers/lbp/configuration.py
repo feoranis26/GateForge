@@ -6,8 +6,10 @@ from enum import StrEnum
 from gateforge.providers.lbp.types import (
     LBPCounterType,
     LBPGateType,
+    LBPPhaseSelectorType,
     LBPRandomizerType,
     LBPSelectorType,
+    LBPStorageSelectorType,
     LBPTimerType,
     decode_lbp_object_type,
 )
@@ -33,6 +35,15 @@ class LBPRandomizerMode(StrEnum):
 class LBPRandomizerInputAction(StrEnum):
     TRIGGER = "TRIGGER"
     OVERRIDE_PATTERN = "OVERRIDE_PATTERN"
+
+
+@dataclass(frozen=True, slots=True)
+class LBPSelectorStateConfiguration:
+    selection: int
+
+    def __post_init__(self) -> None:
+        if self.selection not in {0, 1}:
+            raise ValueError("LBP state Selector selection must be zero or one")
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +142,17 @@ class LBPObjectConfigurationCodec:
                     "on_min_ds": value.on_min_ds,
                 }
             )
+        if isinstance(
+            decoded_type,
+            (LBPPhaseSelectorType, LBPStorageSelectorType),
+        ):
+            if not isinstance(value, LBPSelectorStateConfiguration):
+                raise ValueError(
+                    "LBP state Selector requires LBPSelectorStateConfiguration"
+                )
+            return ProviderConfiguration.from_canonical_data(
+                {"selection": value.selection}
+            )
         if isinstance(decoded_type, (LBPGateType, LBPSelectorType)) and value is None:
             return ProviderConfiguration()
         raise ValueError(f"Object type {object_type.name!r} is not configurable")
@@ -203,4 +225,17 @@ class LBPObjectConfigurationCodec:
             if configuration.is_empty:
                 return None
             raise ValueError("LBP Selector does not accept configuration")
+        if isinstance(
+            decoded_type,
+            (LBPPhaseSelectorType, LBPStorageSelectorType),
+        ):
+            data = configuration.canonical_data()
+            if set(data) != {"selection"}:
+                raise ValueError(
+                    "LBP state Selector configuration requires selection"
+                )
+            selection = data["selection"]
+            if not isinstance(selection, int) or isinstance(selection, bool):
+                raise ValueError("LBP state Selector selection must be an integer")
+            return LBPSelectorStateConfiguration(selection)
         raise ValueError(f"Unsupported LBP object type {object_type.name!r}")

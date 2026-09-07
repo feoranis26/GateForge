@@ -84,6 +84,22 @@ class MaterializationTests(unittest.TestCase):
         self.assertIsNotNone(left_ports[("o", 0)])
         self.assertIsNotNone(right_ports[("o", 0)])
 
+        implementation_objects = {
+            identifier
+            for implementation in material.implementations
+            for identifier in implementation.objects
+        }
+        self.assertEqual(
+            implementation_objects,
+            {item.identifier for item in material.objects},
+        )
+        self.assertTrue(
+            all(
+                implementation.owner_module in modules
+                for implementation in material.implementations
+            )
+        )
+
     def test_material_hierarchy_round_trips(self) -> None:
         _, _, material = compile_material(str(NESTED_FIXTURE))
         restored = type(material).from_canonical_data(

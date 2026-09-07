@@ -17,6 +17,10 @@ from gateforge.providers.lbp.types.intrinsic import (
     LBPSelectorType,
     LBPTimerType,
 )
+from gateforge.providers.lbp.types.stateful import (
+    LBPPhaseSelectorType,
+    LBPStorageSelectorType,
+)
 from gateforge.target import ObjectTypeIdentifier, PrefabValidationError
 from gateforge.type_codec import (
     TypeCodecError,
@@ -52,8 +56,10 @@ __all__ = [
     "LBPNotGateType",
     "LBPObjectType",
     "LBPOrGateType",
+    "LBPPhaseSelectorType",
     "LBPRandomizerType",
     "LBPSelectorType",
+    "LBPStorageSelectorType",
     "LBPTimerType",
     "LBPXorGateType",
     "decode_lbp_object_type",

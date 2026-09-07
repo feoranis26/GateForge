@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from gateforge.material import ImplementationPackaging
 from gateforge.providers.lbp.common import LBP_LOGIC, LBP_PROVIDER, LBP_WIRE
 from gateforge.providers.lbp.types import LBPNotGateType
 from gateforge.state import (
@@ -107,6 +108,42 @@ class CompilationStateTests(unittest.TestCase):
         self.assertEqual(restored.canonical_data(), state.canonical_data())
         self.assertEqual(restored.canonical_bytes(), state.canonical_bytes())
         self.assertEqual(restored.get_digest(), state.get_digest())
+
+    def test_schema_one_state_defaults_generated_implementation_metadata(self) -> None:
+        prefab = _prefab()
+        claim = ClaimDefinition(
+            identifier=ClaimDefinitionId("claim"),
+            prefab=prefab.get_id(),
+            module="top",
+            instance="$claim",
+            blackbox="gateforge_box",
+            ports=(
+                ClaimPortBinding("p0", PrefabPortRef("A"), PortDirection.INPUT),
+                ClaimPortBinding("p1", PrefabPortRef("Y"), PortDirection.OUTPUT),
+            ),
+            provider="test",
+            mapper="test.mapper",
+            rule="buffer",
+            rule_version=1,
+            accepted_revision=4,
+            source_provenance=("top.source",),
+        )
+        state = CompilationIntermediateState.empty(revision=4).with_acceptance(
+            revision=5,
+            prefabs=[prefab],
+            claims=[claim],
+        )
+        legacy = state.canonical_data()
+        legacy["schema_version"] = 1
+        for item in legacy["claims"]:
+            item.pop("implementation_name")
+            item.pop("packaging")
+
+        restored = CompilationIntermediateState.from_canonical_data(legacy)
+        restored_claim = next(iter(restored.claims.values()))
+
+        self.assertEqual(restored_claim.implementation_name, "buffer")
+        self.assertEqual(restored_claim.packaging, ImplementationPackaging.AUTO)
 
     def test_acceptance_interns_prefab_and_durable_claim(self) -> None:
         prefab = _prefab()

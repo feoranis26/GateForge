@@ -398,7 +398,8 @@ class LbpPlanDesign:
         )
 
         gadgets_by_id = {item.identifier: item for item in gadgets}
-        placement_ids = {item.gadget for item in placements}
+        placements_by_id = {item.gadget: item for item in placements}
+        placement_ids = set(placements_by_id)
         gadget_ids = set(gadgets_by_id)
         if placement_ids != gadget_ids:
             raise LbpPlanRealizationError(
@@ -435,25 +436,124 @@ class LbpPlanDesign:
                 )
             driven_inputs.add(connection.target)
 
-        for placement in placements:
-            if abs(placement.x) > self.board_size.x:
-                raise LbpPlanRealizationError(
-                    f"LBP gadget {placement.gadget.value!r} lies outside board X extent"
-                )
-            if abs(placement.y) > self.board_size.y:
-                raise LbpPlanRealizationError(
-                    f"LBP gadget {placement.gadget.value!r} lies outside board Y extent"
-                )
-        for note in notes:
-            if abs(note.x) > self.board_size.x or abs(note.y) > self.board_size.y:
-                raise LbpPlanRealizationError(
-                    f"LBP note {note.identifier.value!r} lies outside board extent"
-                )
+        if self.hierarchy is None:
+            _validate_component_extents(
+                self.board_size,
+                placements,
+                notes,
+            )
+        else:
+            _validate_hierarchical_extents(
+                self.hierarchy,
+                placements_by_id,
+                {item.identifier: item for item in notes},
+            )
 
         object.__setattr__(self, "gadgets", gadgets)
         object.__setattr__(self, "placements", placements)
         object.__setattr__(self, "connections", connections)
         object.__setattr__(self, "notes", notes)
+
+
+def _validate_component_extents(
+    board_size: LbpBoardSize,
+    placements: tuple[LbpGadgetPlacement, ...],
+    notes: tuple[LbpNote, ...],
+    *,
+    center_x: float = 0.0,
+    center_y: float = 0.0,
+    container: str | None = None,
+) -> None:
+    context = "" if container is None else f" in container {container!r}"
+    for placement in placements:
+        if abs(placement.x - center_x) > board_size.x:
+            raise LbpPlanRealizationError(
+                f"LBP gadget {placement.gadget.value!r} lies outside board X "
+                f"extent{context}"
+            )
+        if abs(placement.y - center_y) > board_size.y:
+            raise LbpPlanRealizationError(
+                f"LBP gadget {placement.gadget.value!r} lies outside board Y "
+                f"extent{context}"
+            )
+    for note in notes:
+        if (
+            abs(note.x - center_x) > board_size.x
+            or abs(note.y - center_y) > board_size.y
+        ):
+            raise LbpPlanRealizationError(
+                f"LBP note {note.identifier.value!r} lies outside board extent{context}"
+            )
+
+
+def _validate_hierarchical_extents(
+    hierarchy: LbpPlanHierarchy,
+    placements: dict[LbpGadgetId, LbpGadgetPlacement],
+    notes: dict[LbpNoteId, LbpNote],
+) -> None:
+    containers = {item.path: item for item in hierarchy.containers}
+    centers: dict[str, tuple[float, float]] = {}
+
+    def visit(path: str, parent_x: float, parent_y: float) -> None:
+        container = containers[path]
+        center_x = parent_x + container.x
+        center_y = parent_y + container.y
+        centers[path] = (center_x, center_y)
+        for child_path in container.children:
+            child = containers[child_path]
+            if abs(child.x) > container.board_size.x or abs(child.y) > container.board_size.y:
+                raise LbpPlanRealizationError(
+                    f"LBP child container {child_path!r} lies outside board extent "
+                    f"in container {path!r}"
+                )
+            visit(child_path, center_x, center_y)
+
+    visit(hierarchy.root, 0.0, 0.0)
+    if len(centers) != len(containers):
+        raise LbpPlanRealizationError(
+            "Every LBP container must descend from the hierarchy root"
+        )
+
+    assigned_gadgets: set[LbpGadgetId] = set()
+    assigned_notes: set[LbpNoteId] = set()
+    for container in hierarchy.containers:
+        center_x, center_y = centers[container.path]
+        try:
+            local_placements = tuple(
+                placements[identifier] for identifier in container.gadgets
+            )
+            local_notes = tuple(notes[identifier] for identifier in container.notes)
+        except KeyError as error:
+            raise LbpPlanRealizationError(
+                f"LBP container {container.path!r} references an unknown component"
+            ) from error
+        if assigned_gadgets.intersection(container.gadgets):
+            raise LbpPlanRealizationError(
+                "An LBP gadget cannot belong to multiple containers"
+            )
+        if assigned_notes.intersection(container.notes):
+            raise LbpPlanRealizationError(
+                "An LBP note cannot belong to multiple containers"
+            )
+        assigned_gadgets.update(container.gadgets)
+        assigned_notes.update(container.notes)
+        _validate_component_extents(
+            container.board_size,
+            local_placements,
+            local_notes,
+            center_x=center_x,
+            center_y=center_y,
+            container=container.path,
+        )
+
+    if assigned_gadgets != set(placements):
+        raise LbpPlanRealizationError(
+            "Every LBP gadget must belong to exactly one container"
+        )
+    if assigned_notes != set(notes):
+        raise LbpPlanRealizationError(
+            "Every LBP note must belong to exactly one container"
+        )
 
 
 def _require_unique(values, context: str) -> None:

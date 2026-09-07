@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 import hashlib
 import json
 import re
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
     from gateforge.provider import TargetProvider
 
 
-MATERIAL_SCHEMA_VERSION = 1
+MATERIAL_SCHEMA_VERSION = 2
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -113,11 +114,41 @@ class MaterialModuleOccurrence:
     children: tuple[str, ...]
 
 
+class ImplementationPackaging(StrEnum):
+    INLINE = "inline"
+    AUTO = "auto"
+    CONTAINER = "container"
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialImplementationPort:
+    name: str
+    bit: int
+    direction: PortDirection
+    net: MaterialNetId
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialImplementationOccurrence:
+    path: str
+    occurrence: OccurrenceId
+    owner_module: str
+    prefab: PrefabId
+    provider: str
+    mapper: str
+    rule: str
+    name: str
+    packaging: ImplementationPackaging
+    ports: tuple[MaterialImplementationPort, ...]
+    objects: tuple[MaterialObjectId, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class MaterialDesign:
     objects: tuple[MaterialObject, ...]
     nets: tuple[MaterialNet, ...]
     modules: tuple[MaterialModuleOccurrence, ...] = ()
+    implementations: tuple[MaterialImplementationOccurrence, ...] = ()
 
     def __post_init__(self) -> None:
         if not all(isinstance(item, MaterialObject) for item in self.objects):
@@ -127,15 +158,23 @@ class MaterialDesign:
         objects = tuple(sorted(self.objects, key=lambda item: item.identifier.value))
         nets = tuple(sorted(self.nets, key=lambda item: item.identifier.value))
         modules = tuple(sorted(self.modules, key=lambda item: item.path))
+        implementations = tuple(
+            sorted(self.implementations, key=lambda item: item.path)
+        )
         if len({item.identifier for item in objects}) != len(objects):
             raise MaterialValidationError("Material design has duplicate object IDs")
         if len({item.identifier for item in nets}) != len(nets):
             raise MaterialValidationError("Material design has duplicate net IDs")
         if len({item.path for item in modules}) != len(modules):
             raise MaterialValidationError("Material design has duplicate module paths")
+        if len({item.path for item in implementations}) != len(implementations):
+            raise MaterialValidationError(
+                "Material design has duplicate implementation paths"
+            )
         object.__setattr__(self, "objects", objects)
         object.__setattr__(self, "nets", nets)
         object.__setattr__(self, "modules", modules)
+        object.__setattr__(self, "implementations", implementations)
 
     def canonical_data(self) -> dict[str, object]:
         data: dict[str, object] = {
@@ -158,6 +197,10 @@ class MaterialDesign:
         }
         if self.modules:
             data["modules"] = [_module_data(item) for item in self.modules]
+        if self.implementations:
+            data["implementations"] = [
+                _implementation_data(item) for item in self.implementations
+            ]
         return data
 
     def canonical_bytes(self) -> bytes:
@@ -181,11 +224,11 @@ class MaterialDesign:
         _require_keys(
             data,
             {"schema_version", "objects", "nets"},
-            {"modules"},
+            {"modules", "implementations"},
             "material design",
         )
         version = _require_int(data.get("schema_version"), "material schema version")
-        if version != MATERIAL_SCHEMA_VERSION:
+        if version not in {1, MATERIAL_SCHEMA_VERSION}:
             raise MaterialValidationError(
                 f"Unsupported material schema version {version}"
             )
@@ -286,7 +329,22 @@ class MaterialDesign:
                 else []
             )
         )
-        design = cls(tuple(objects), tuple(nets), modules)
+        implementations = tuple(
+            _decode_implementation_occurrence(item)
+            for item in (
+                _require_list(
+                    data.get("implementations"),
+                    "material implementations",
+                )
+                if "implementations" in data
+                else []
+            )
+        )
+        if version == 1 and implementations:
+            raise MaterialValidationError(
+                "Material schema version 1 cannot contain implementations"
+            )
+        design = cls(tuple(objects), tuple(nets), modules, implementations)
         validate_material_design(design, providers)
         return design
 
@@ -325,6 +383,126 @@ def _module_data(item: MaterialModuleOccurrence) -> dict[str, object]:
         "objects": [identifier.value for identifier in item.objects],
         "children": list(item.children),
     }
+
+
+def _implementation_data(
+    item: MaterialImplementationOccurrence,
+) -> dict[str, object]:
+    return {
+        "path": item.path,
+        "occurrence": item.occurrence.value,
+        "owner_module": item.owner_module,
+        "prefab": item.prefab.value,
+        "provider": item.provider,
+        "mapper": item.mapper,
+        "rule": item.rule,
+        "name": item.name,
+        "packaging": item.packaging.value,
+        "ports": [
+            {
+                "name": port.name,
+                "bit": port.bit,
+                "direction": port.direction.value,
+                "net": port.net.value,
+            }
+            for port in item.ports
+        ],
+        "objects": [identifier.value for identifier in item.objects],
+    }
+
+
+def _decode_implementation_occurrence(
+    value: object,
+) -> MaterialImplementationOccurrence:
+    data = _require_mapping(value, "material implementation")
+    _require_keys(
+        data,
+        {
+            "path",
+            "occurrence",
+            "owner_module",
+            "prefab",
+            "provider",
+            "mapper",
+            "rule",
+            "name",
+            "packaging",
+            "ports",
+            "objects",
+        },
+        set(),
+        "material implementation",
+    )
+    ports: list[MaterialImplementationPort] = []
+    for raw_port in _require_list(
+        data.get("ports"),
+        "material implementation ports",
+    ):
+        port = _require_mapping(raw_port, "material implementation port")
+        _require_keys(
+            port,
+            {"name", "bit", "direction", "net"},
+            set(),
+            "material implementation port",
+        )
+        ports.append(
+            MaterialImplementationPort(
+                name=_require_nonempty_str(
+                    port.get("name"),
+                    "implementation port name",
+                ),
+                bit=_require_nonnegative_int(
+                    port.get("bit"),
+                    "implementation port bit",
+                ),
+                direction=PortDirection(
+                    _require_nonempty_str(
+                        port.get("direction"),
+                        "implementation port direction",
+                    )
+                ),
+                net=MaterialNetId(
+                    _require_digest(port.get("net"), "implementation port net")
+                ),
+            )
+        )
+    return MaterialImplementationOccurrence(
+        path=_require_nonempty_str(data.get("path"), "implementation path"),
+        occurrence=OccurrenceId(
+            _require_digest(data.get("occurrence"), "implementation occurrence")
+        ),
+        owner_module=_require_nonempty_str(
+            data.get("owner_module"),
+            "implementation owner module",
+        ),
+        prefab=PrefabId(
+            _require_digest(data.get("prefab"), "implementation prefab")
+        ),
+        provider=_require_nonempty_str(
+            data.get("provider"),
+            "implementation provider",
+        ),
+        mapper=_require_nonempty_str(
+            data.get("mapper"),
+            "implementation mapper",
+        ),
+        rule=_require_nonempty_str(data.get("rule"), "implementation rule"),
+        name=_require_nonempty_str(data.get("name"), "implementation name"),
+        packaging=ImplementationPackaging(
+            _require_nonempty_str(
+                data.get("packaging"),
+                "implementation packaging",
+            )
+        ),
+        ports=tuple(ports),
+        objects=tuple(
+            MaterialObjectId(_require_digest(item, "implementation object ID"))
+            for item in _require_list(
+                data.get("objects"),
+                "implementation objects",
+            )
+        ),
+    )
 
 
 def _decode_module_occurrence(value: object) -> MaterialModuleOccurrence:
@@ -597,6 +775,67 @@ def validate_material_design(
             raise MaterialValidationError(
                 "Material hierarchy does not assign every material object"
             )
+
+    modules = {item.path: item for item in design.modules}
+    implementation_objects: set[MaterialObjectId] = set()
+    occurrences: set[OccurrenceId] = set()
+    for implementation in design.implementations:
+        if implementation.owner_module not in modules:
+            raise MaterialValidationError(
+                f"Material implementation {implementation.path!r} has missing "
+                f"owner module {implementation.owner_module!r}"
+            )
+        if implementation.occurrence in occurrences:
+            raise MaterialValidationError(
+                f"Duplicate material implementation occurrence "
+                f"{implementation.occurrence.value}"
+            )
+        occurrences.add(implementation.occurrence)
+        if not implementation.objects:
+            raise MaterialValidationError(
+                f"Material implementation {implementation.path!r} has no objects"
+            )
+        seen_ports: set[tuple[str, int]] = set()
+        for port in implementation.ports:
+            key = (port.name, port.bit)
+            if not port.name or port.bit < 0 or key in seen_ports:
+                raise MaterialValidationError(
+                    f"Material implementation {implementation.path!r} has invalid "
+                    f"or duplicate port {key!r}"
+                )
+            seen_ports.add(key)
+            if port.net not in nets_by_id:
+                raise MaterialValidationError(
+                    f"Material implementation {implementation.path!r} port "
+                    f"{key!r} refers to missing net {port.net.value}"
+                )
+        for identifier in implementation.objects:
+            try:
+                material_object = objects[identifier]
+            except KeyError as error:
+                raise MaterialValidationError(
+                    f"Material implementation {implementation.path!r} refers to "
+                    f"missing object {identifier.value}"
+                ) from error
+            if identifier in implementation_objects:
+                raise MaterialValidationError(
+                    f"Material object {identifier.value} belongs to multiple "
+                    "implementations"
+                )
+            implementation_objects.add(identifier)
+            if material_object.occurrence != implementation.occurrence:
+                raise MaterialValidationError(
+                    f"Material implementation {implementation.path!r} mixes "
+                    "object occurrences"
+                )
+            if material_object.prefab != implementation.prefab:
+                raise MaterialValidationError(
+                    f"Material implementation {implementation.path!r} mixes prefabs"
+                )
+            if material_object.type.provider != implementation.provider:
+                raise MaterialValidationError(
+                    f"Material implementation {implementation.path!r} mixes providers"
+                )
 
     used_endpoints: set[MaterialObjectPortRef | MaterialModulePortRef] = set()
     for net in design.nets:

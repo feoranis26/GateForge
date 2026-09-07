@@ -266,6 +266,7 @@ def _prefab_for(cell: CellSnapshot, kind: IntrinsicKind) -> SemanticPrefab:
 
 class LBPIntrinsicMapper(MappingProvider):
     provider = LBP_PROVIDER
+    stages = frozenset({"source"})
     rule_version = 1
 
     def map(self, design: DesignSnapshot) -> tuple[MappingProposal, ...]:

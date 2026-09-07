@@ -3,8 +3,11 @@ from collections.abc import Hashable, Mapping
 from dataclasses import dataclass
 import json
 
-from gateforge.design import DesignContext, rtlil_id
+from gateforge.design import DesignContext
 from gateforge.material import (
+    ImplementationPackaging,
+    MaterialImplementationOccurrence,
+    MaterialImplementationPort,
     MaterialAttachment,
     MaterialConstantRef,
     MaterialDesign,
@@ -28,6 +31,7 @@ from gateforge.target import (
     NetworkTypeIdentifier,
     ObjectPortRef,
     PortDirection,
+    PrefabId,
     PrefabPortRef,
 )
 
@@ -50,6 +54,23 @@ class _ModuleDraft:
     ports: list[tuple[str, int, PortDirection, _SignalOccurrence | None]]
     objects: list[MaterialObjectId]
     children: list[str]
+
+
+@dataclass(slots=True)
+class _ImplementationDraft:
+    path: str
+    occurrence: OccurrenceId
+    owner_module: str
+    prefab: PrefabId
+    provider: str
+    mapper: str
+    rule: str
+    name: str
+    packaging: ImplementationPackaging
+    ports: list[
+        tuple[str, int, PortDirection, tuple[OccurrenceId, str]]
+    ]
+    objects: list[MaterialObjectId]
 
 
 class _DisjointSet:
@@ -317,6 +338,7 @@ def materialize_hierarchy(
     ] = defaultdict(set)
     signal_constants: dict[_SignalOccurrence, set[MaterialConstantRef]] = defaultdict(set)
     drafts: list[_ModuleDraft] = []
+    implementation_drafts: list[_ImplementationDraft] = []
 
     def signal(path: str, bit: SnapshotBitRef) -> _SignalOccurrence:
         result = (path, bit)
@@ -442,6 +464,29 @@ def materialize_hierarchy(
                         local_constants[local_key].add(
                             MaterialConstantRef(source.value.value)
                         )
+                implementation_drafts.append(
+                    _ImplementationDraft(
+                        path=f"{path}/implementation:{occurrence.value}",
+                        occurrence=occurrence,
+                        owner_module=path,
+                        prefab=claim.prefab,
+                        provider=claim.provider,
+                        mapper=claim.mapper,
+                        rule=claim.rule,
+                        name=claim.implementation_name or claim.rule,
+                        packaging=claim.packaging,
+                        ports=[
+                            (
+                                binding.target.port,
+                                binding.target.bit,
+                                binding.direction,
+                                external_to_local[binding.target],
+                            )
+                            for binding in claim.ports
+                        ],
+                        objects=list(role_to_object.values()),
+                    )
+                )
                 continue
 
             child_module = snapshot.modules.get(cell.identifier.expected_type)
@@ -586,10 +631,38 @@ def materialize_hierarchy(
         )
         for draft in drafts
     )
+    implementations = tuple(
+        MaterialImplementationOccurrence(
+            path=draft.path,
+            occurrence=draft.occurrence,
+            owner_module=draft.owner_module,
+            prefab=draft.prefab,
+            provider=draft.provider,
+            mapper=draft.mapper,
+            rule=draft.rule,
+            name=draft.name,
+            packaging=draft.packaging,
+            ports=tuple(
+                MaterialImplementationPort(
+                    name,
+                    bit,
+                    direction,
+                    local_root_to_net[local_sets.find(local_key)],
+                )
+                for name, bit, direction, local_key in sorted(
+                    draft.ports,
+                    key=lambda item: (item[0], item[1]),
+                )
+            ),
+            objects=tuple(sorted(draft.objects, key=lambda item: item.value)),
+        )
+        for draft in implementation_drafts
+    )
     material = MaterialDesign(
         objects=tuple(objects.values()),
         nets=tuple(material_nets),
         modules=modules,
+        implementations=implementations,
     )
     objects_by_id = {item.identifier: item for item in material.objects}
     for net in material.nets:

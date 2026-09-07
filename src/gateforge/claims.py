@@ -119,6 +119,8 @@ def _claim_definition_id(
         "rule": proposal.rule,
         "rule_version": proposal.rule_version,
         "prefab": proposal.prefab.get_id().value,
+        "implementation_name": proposal.implementation_name,
+        "packaging": proposal.packaging.value,
     }
     encoded = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return (
@@ -356,6 +358,11 @@ def accept_mapping_proposals(
                 rule_version=prepared.proposal.rule_version,
                 accepted_revision=snapshot.revision,
                 source_provenance=prepared.source_provenance,
+                implementation_name=(
+                    prepared.proposal.implementation_name
+                    or prepared.proposal.rule
+                ),
+                packaging=prepared.proposal.packaging,
             )
         )
 

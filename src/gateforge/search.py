@@ -266,7 +266,7 @@ class CompilationSearch:
             state = state.with_revision(context.revision)
 
         snapshot = context.snapshot()
-        proposals = self.mapper.collect_proposals(snapshot)
+        proposals = self.mapper.collect_proposals(snapshot, stage.name)
         if self.options.mode == MappingSearchMode.GREEDY:
             alternatives = (tuple(self.mapper.combine(proposals, snapshot.revision)),)
         else:

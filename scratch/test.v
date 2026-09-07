@@ -15,8 +15,8 @@ module test (
     input wire goto_b,
     input wire goto_c,
     input wire clk,
-    input wire reset,
-);j
+    input wire reset
+);
 
     reg [1:0] cur_state;
     reg [1:0] next_state;

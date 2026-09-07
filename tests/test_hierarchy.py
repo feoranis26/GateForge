@@ -3,12 +3,16 @@ import unittest
 
 from gateforge.gateforge import compile_material
 from gateforge.hierarchy import (
+    GeneratedHierarchyMode,
+    GeneratedHierarchyPolicy,
     PhysicalHierarchyMode,
     PhysicalHierarchyPolicy,
     SynthesisHierarchyMode,
     SynthesisHierarchyPolicy,
     retained_module_paths,
+    retained_implementation_paths,
 )
+from gateforge.material import ImplementationPackaging
 from gateforge.providers.lbp.common import LBP_PROVIDER
 from gateforge.providers.lbp.objects import make_lbp_provider
 
@@ -102,6 +106,42 @@ class HierarchyPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(retained, frozenset({"module:test_with_inverters"}))
+
+    def test_generated_auto_policy_uses_size_and_packaging_hints(self) -> None:
+        from dataclasses import replace
+
+        _, _, material = compile_material(str(FIXTURE))
+        implementations = list(material.implementations)
+        forced = replace(
+            implementations[0],
+            packaging=ImplementationPackaging.CONTAINER,
+        )
+        inline = replace(
+            implementations[1],
+            packaging=ImplementationPackaging.INLINE,
+        )
+        material = replace(
+            material,
+            implementations=(forced, inline, *implementations[2:]),
+        )
+
+        retained = retained_implementation_paths(
+            material,
+            GeneratedHierarchyPolicy(GeneratedHierarchyMode.AUTO),
+        )
+
+        self.assertIn(forced.path, retained)
+        self.assertNotIn(inline.path, retained)
+
+    def test_generated_inline_policy_disables_all_groups(self) -> None:
+        _, _, material = compile_material(str(FIXTURE))
+
+        retained = retained_implementation_paths(
+            material,
+            GeneratedHierarchyPolicy(GeneratedHierarchyMode.INLINE),
+        )
+
+        self.assertEqual(retained, frozenset())
 
 
 if __name__ == "__main__":

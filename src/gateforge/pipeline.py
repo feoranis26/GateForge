@@ -69,7 +69,7 @@ def run_mapping_stages(
             state = state.with_revision(context.revision)
 
         snapshot = context.snapshot()
-        proposals = mapper.map_design(snapshot)
+        proposals = mapper.map_design(snapshot, stage.name)
         if proposals:
             state = accept_mapping_proposals(
                 context,

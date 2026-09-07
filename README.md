@@ -11,14 +11,15 @@ intrinsics.
 ## Compiler Pipeline
 
 1. Yosys reads the source
-2. GateForge checkpoints the complete design as deterministic RTLIL and requests proposals from mapping providers at each stage.
-3. Greedy, beam, or exhaustive search selects compatible proposal sets. Beam and exhaustive modes preserve accept/defer branches across lowering stages.
-4. GateForge validates each exact source cut, creates an opaque blackbox, and removes the accepted source cells before the next lowering stage.
+2. GateForge checkpoints the complete design as deterministic RTLIL
+3. GateForge starts lowering stages and requests proposals from mapping providers at each stage
+3. Greedy, beam, or exhaustive search selects compatible proposal sets. Beam and exhaustive modes preserve accept/defer branches across lowering stages
+4. GateForge validates each exact source cut, creates an opaque blackbox, and removes the accepted source cells before the next lowering stage
 5. The default stages offer source, extracted-FSM, post-FSM, and optimized leaf mapping checkpoints. ABC is optional and runs before leaf mapping.
-6. Yosys uniquifies module occurrences and flattens hierarchy while preserving claim attributes.
+6. Yosys uniquifies module occurrences and flattens hierarchy while preserving claim attributes
 7. GateForge expands each flattened claim occurrence into material objects and merges their external prefab nets through the final RTLIL connectivity.
 8. A target provider projects ordering dependencies from the neutral material nets.
-9. An optional placer assigns coordinates without coupling placement to deployment.
+9. GateForge outputs material netlist for placement.
 
 ## Artifacts
 
@@ -51,6 +52,9 @@ frontier, while `exhaustive` is intended for small designs and tests. Proposal
 costs order the search; surviving complete candidates are materialized and the
 lowest exact provider object cost wins.
 
+Register banks use the compact Counter-based implementation by default. Select
+the larger two-phase fallback with `--register-style hardened`.
+
 - `--emit-json` writes the final flattened Yosys design.
 - `--emit-state` writes semantic prefabs and durable claims.
 - `--emit-material` writes the reusable material object and network graph.
@@ -65,9 +69,6 @@ uv run gateforge place build/material.json \
 	--column-pitch 210 \
 	--row-pitch 105
 ```
-
-Without `--output`, `place` writes placement JSON to stdout and status messages
-to stderr.
 
 Export a placed LBP design as Craftworld Toolkit-compatible PLAN JSON:
 
@@ -108,6 +109,18 @@ Physical hierarchy controls only packaging during LBP export:
   recursive material objects.
 - `min-cost --hierarchy-threshold C` uses provider-estimated physical cost.
 
+Generated implementations use an independent export policy:
+
+- `--generated-hierarchy inline` leaves implementation gadgets on their HDL
+  owner board.
+- `--generated-hierarchy auto` is the default; explicit containers and
+  substantial generated prefabs become nested microchips.
+- `--generated-hierarchy all` contains every multi-object generated prefab.
+
+For example, compatible DFFs sharing clock/reset semantics are mapped as one
+register bank and exported as one generated microchip rather than exposing each
+storage gate on the parent board.
+
 Synthesis flattening is irreversible. A physical export policy can collapse
 additional preserved boundaries, but cannot recreate boundaries removed before
 mapping.
@@ -118,10 +131,8 @@ buffers, places labeled notes outside those buffers, and uses batteries for
 binary constants. Use `--title`,
 `--description`, and `--creator` to override inventory metadata.
 
-Treat Big Profile mutation as an offline operation: fully exit LBP, back up the
-profile, import and save the generated PLAN with Craftworld Toolkit, and then
-restart the game. Repacking a profile while LBP is running can leave its cached
-resource state inconsistent until restart.
+DO NOT KEEP THE GAME RUNNING WHEN WRITING TO BIGFART!!! This will lead to desync
+between game memory caches and can lead to undefined behavior and corruption!
 
 ## Placement Model
 
@@ -131,10 +142,12 @@ remain in provider validation. This allows LBP to enforce one producer per wire
 without imposing that restriction on targets whose networks combine multiple
 sources.
 
-The initial topological placer requires an acyclic dependency graph. It places
-inputs and constants on the left, outputs on the right, and material objects in
-deterministic longest-path layers. Coordinates represent center points only;
-provider-supplied object geometry reserves enough vertical rows for wide gates.
+The topological placer condenses strongly connected components, places the
+resulting DAG in deterministic longest-path layers, and places members of each
+feedback component together without deleting loop edges. It places inputs and
+constants on the left and outputs on the right. Coordinates represent center
+points only; provider-supplied object geometry reserves enough vertical rows for
+wide gates.
 The default 210-by-105 grid leaves one globally aligned routing row after every
 five content rows. Override that policy with `--routing-group-size` and
 `--routing-gap-rows`. Collision optimization, explicit wire routing, and
@@ -145,6 +158,33 @@ backends must load both and verify the placement's material digest before
 realizing a target-specific design.
 
 The compiler will fail if it exhausts all lowering passes but unclaimed RTLIL objects remain
+
+## Stateful Logic
+
+GateForge maps coarse `$dff`, `$dffe`, `$adff`, `$adffe`, `$sdff`, `$sdffe`, and
+`$sdffce` cells before `techmap` and regroups their scalar equivalents as a leaf
+fallback. Registers in the same source module share one bank when their clock,
+reset signal, polarity, timing, and reset/enable priority match. Width and reset
+value do not split a bank; mixed reset bits are retained as one reset vector.
+Different enable sources become shared subgroups inside the same bank.
+
+The default non-Memorizer realization is compact: one target-1 self-resetting
+Counter generates a one-frame edge pulse for the entire bank, and each bit adds
+one NOT, two AND gates, and one state Selector. Use
+`--register-style hardened` to select the larger captured two-phase
+implementation instead. Synchronous and asynchronous reset circuitry is
+generated according to Yosys semantics. The compact style has been reported to
+work in game; hardened and synthesized reset/enable behavior still require the
+full in-game acceptance matrix.
+
+Generated register microchips receive a deterministic dense layout independent
+of the flat compilation placement. Compatible bits are tiled together, shared
+clock/reset/enable controls occupy a dedicated row, and the parent board is
+reflown with each retained child treated as one compound component.
+
+Material feedback is preserved. The topological placer condenses strongly
+connected components for ordering and lays each component out deterministically
+without deleting loop edges.
 
 ## GateForge Intrinsics
 

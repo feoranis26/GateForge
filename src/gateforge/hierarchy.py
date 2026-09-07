@@ -6,7 +6,11 @@ import math
 from collections.abc import Mapping
 
 from gateforge.design import DesignContext
-from gateforge.material import MaterialDesign, MaterialModuleOccurrence
+from gateforge.material import (
+    ImplementationPackaging,
+    MaterialDesign,
+    MaterialModuleOccurrence,
+)
 from gateforge.provider import TargetProvider
 
 
@@ -143,6 +147,50 @@ class PhysicalHierarchyMode(StrEnum):
     PRESERVE_ALL = "preserve-all"
     MIN_OBJECTS = "min-objects"
     MIN_COST = "min-cost"
+
+
+class GeneratedHierarchyMode(StrEnum):
+    INLINE = "inline"
+    AUTO = "auto"
+    ALL = "all"
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedHierarchyPolicy:
+    mode: GeneratedHierarchyMode = GeneratedHierarchyMode.AUTO
+    auto_min_objects: int = 3
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.auto_min_objects, int)
+            or isinstance(self.auto_min_objects, bool)
+            or self.auto_min_objects <= 0
+        ):
+            raise HierarchyPolicyError(
+                "Generated hierarchy auto_min_objects must be positive"
+            )
+
+
+def retained_implementation_paths(
+    design: MaterialDesign,
+    policy: GeneratedHierarchyPolicy,
+) -> frozenset[str]:
+    if policy.mode == GeneratedHierarchyMode.INLINE:
+        return frozenset()
+    retained: set[str] = set()
+    for implementation in design.implementations:
+        if implementation.packaging == ImplementationPackaging.INLINE:
+            continue
+        if policy.mode == GeneratedHierarchyMode.ALL:
+            if len(implementation.objects) > 1:
+                retained.add(implementation.path)
+            continue
+        if implementation.packaging == ImplementationPackaging.CONTAINER or (
+            implementation.packaging == ImplementationPackaging.AUTO
+            and len(implementation.objects) >= policy.auto_min_objects
+        ):
+            retained.add(implementation.path)
+    return frozenset(retained)
 
 
 @dataclass(frozen=True, slots=True)

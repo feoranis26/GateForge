@@ -278,7 +278,7 @@ class TopologicalPlacementTests(unittest.TestCase):
             (first_x + last_x) / 2,
         )
 
-    def test_cycle_error_reports_the_complete_component(self) -> None:
+    def test_cycle_is_placed_as_one_deterministic_component(self) -> None:
         left = _material_object("left", ADDITIVE_NODE, "a")
         right = _material_object("right", ADDITIVE_NODE, "c")
         design = MaterialDesign(
@@ -301,11 +301,75 @@ class TopologicalPlacementTests(unittest.TestCase):
             {ADDITIVE_PROVIDER: _additive_provider()},
         )
 
-        with self.assertRaises(PlacementError) as raised:
-            TopologicalPlacer().place(graph)
+        first = TopologicalPlacer().place(graph).finalize(graph)
+        second = TopologicalPlacer().place(graph).finalize(graph)
+        by_object = {
+            item.object: (item.x, item.y) for item in first.placements.objects
+        }
 
-        self.assertIn(left.identifier.value, str(raised.exception))
-        self.assertIn(right.identifier.value, str(raised.exception))
+        self.assertEqual(by_object[left.identifier][0], by_object[right.identifier][0])
+        self.assertNotEqual(by_object[left.identifier][1], by_object[right.identifier][1])
+        self.assertEqual(first.canonical_data(), second.canonical_data())
+        self.assertEqual(len(graph.dependencies), 2)
+
+    def test_self_loop_is_placed_without_dropping_dependency(self) -> None:
+        gate = _material_object("gate", ADDITIVE_NODE, "e")
+        loop = _material_net(
+            ADDITIVE_WIRE,
+            MaterialObjectPortRef(gate.identifier, "OUT"),
+            MaterialObjectPortRef(gate.identifier, "IN"),
+        )
+        graph = MaterialGraph.from_design(
+            MaterialDesign((gate,), (loop,)),
+            {ADDITIVE_PROVIDER: _additive_provider()},
+        )
+
+        coordinates, _ = _coordinates(graph)
+
+        self.assertEqual(set(coordinates), {gate.identifier})
+        self.assertEqual(len(graph.dependencies), 1)
+
+    def test_fan_in_and_fan_out_surround_feedback_component(self) -> None:
+        source = _material_object("source", ADDITIVE_NODE, "g")
+        left = _material_object("left", ADDITIVE_NODE, "i")
+        right = _material_object("right", ADDITIVE_NODE, "k")
+        sink = _material_object("sink", ADDITIVE_NODE, "m")
+        design = MaterialDesign(
+            (source, left, right, sink),
+            (
+                _material_net(
+                    ADDITIVE_WIRE,
+                    MaterialObjectPortRef(left.identifier, "OUT"),
+                    MaterialObjectPortRef(right.identifier, "IN"),
+                ),
+                _material_net(
+                    ADDITIVE_WIRE,
+                    MaterialObjectPortRef(source.identifier, "OUT"),
+                    MaterialObjectPortRef(right.identifier, "OUT"),
+                    MaterialObjectPortRef(left.identifier, "IN"),
+                    MaterialObjectPortRef(sink.identifier, "IN"),
+                ),
+            ),
+        )
+        graph = MaterialGraph.from_design(
+            design,
+            {ADDITIVE_PROVIDER: _additive_provider()},
+        )
+
+        coordinates, _ = _coordinates(graph)
+
+        self.assertLess(
+            coordinates[source.identifier][0],
+            coordinates[left.identifier][0],
+        )
+        self.assertEqual(
+            coordinates[left.identifier][0],
+            coordinates[right.identifier][0],
+        )
+        self.assertLess(
+            coordinates[right.identifier][0],
+            coordinates[sink.identifier][0],
+        )
 
     def test_empty_graph_is_rejected(self) -> None:
         graph = MaterialGraph.from_design(MaterialDesign((), ()), {})

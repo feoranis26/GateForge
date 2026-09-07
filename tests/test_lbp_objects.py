@@ -18,6 +18,7 @@ from gateforge.providers.lbp.configuration import (
     LBPRandomizerMode,
     LBPTimerConfiguration,
     LBPTimerMode,
+    LBPSelectorStateConfiguration,
 )
 from gateforge.providers.lbp.types import (
     LBPAndGateType,
@@ -26,8 +27,10 @@ from gateforge.providers.lbp.types import (
     LBPGateType,
     LBPNotGateType,
     LBPOrGateType,
+    LBPPhaseSelectorType,
     LBPRandomizerType,
     LBPSelectorType,
+    LBPStorageSelectorType,
     LBPXorGateType,
     LBPTimerType,
     decode_lbp_object_type,
@@ -187,6 +190,33 @@ class LBPObjectTypeTests(unittest.TestCase):
                 selector.get_type(),
                 ProviderConfiguration(),
             )
+        )
+
+    def test_state_selector_types_expose_only_used_semantic_ports(self) -> None:
+        from gateforge.providers.lbp.objects import make_lbp_provider
+
+        provider = make_lbp_provider()
+        phase = LBPPhaseSelectorType()
+        storage = LBPStorageSelectorType()
+        configuration = LBPSelectorStateConfiguration(1)
+
+        self.assertEqual(
+            {port.name for port in phase.get_schema().ports},
+            {"IN_0", "OUT_0", "OUT_1"},
+        )
+        self.assertEqual(
+            {port.name for port in storage.get_schema().ports},
+            {"IN_1", "IN_2", "OUT"},
+        )
+        self.assertEqual(
+            provider.decode_object_configuration(
+                storage.get_type(),
+                provider.encode_object_configuration(
+                    storage.get_type(),
+                    configuration,
+                ),
+            ),
+            configuration,
         )
 
     def test_all_leaf_identifiers_round_trip_exactly(self) -> None:

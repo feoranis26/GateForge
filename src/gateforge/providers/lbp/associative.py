@@ -183,6 +183,7 @@ def _wide_prefab(
 
 class LBPAssociativeConeMapper(MappingProvider):
     provider = LBP_PROVIDER
+    stages = frozenset({"leaf"})
     mapper_id = "lbp.combinatorial.associative"
     rule_version = 1
 

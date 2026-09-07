@@ -124,6 +124,12 @@ class MappingTests(unittest.TestCase):
             {0, 1},
         )
 
+    def test_stage_filter_skips_provider_outside_declared_checkpoint(self) -> None:
+        mapper = Mapper([LBPCombinatorialLowLevelGateMapper()])
+
+        self.assertEqual(mapper.collect_proposals(_snapshot(), "source"), ())
+        self.assertEqual(len(mapper.collect_proposals(_snapshot(), "leaf")), 1)
+
     def test_required_proposal_excludes_conflicting_speculative_proposal(self) -> None:
         snapshot = _snapshot()
         proposal = LBPCombinatorialLowLevelGateMapper().map(snapshot)[0]

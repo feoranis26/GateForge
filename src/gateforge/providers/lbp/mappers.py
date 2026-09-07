@@ -47,6 +47,7 @@ _UNARY_PORT_BINDINGS = (
 
 class LBPCombinatorialLowLevelGateMapper(MappingProvider):
     provider = LBP_PROVIDER
+    stages = frozenset({"leaf"})
     mapper_id = "lbp.combinatorial.low_level"
     rule_version = 2
     tcell_types = frozenset(
