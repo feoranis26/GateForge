@@ -66,8 +66,8 @@ class LBPCombinatorialVariableWidthGateType(LBPGateType):
 
     def get_placement_geometry(self) -> ObjectPlacementGeometry:
         return ObjectPlacementGeometry(
-            width=105.0,
-            height=52.5 * max(self.width, 2),
+            width=52.5,
+            height=26.25 * max(self.width, 2),
         )
 
     @classmethod

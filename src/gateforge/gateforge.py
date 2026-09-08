@@ -1,14 +1,21 @@
 import argparse
-from dataclasses import replace
 import json
-import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 import sys
-import tempfile
 
-from pyosys import libyosys as ys
-from gateforge.design import DesignContext, export_json
+from gateforge.artifacts import write_json as _write_json
+from gateforge.compiler import (
+    compile_material,
+    compile_material_with_report,
+    compile_source,
+    default_mapping_providers as _default_mapping_providers,
+    default_target_providers as _target_providers,
+    design_preprocess,
+    search_source as _search_source,
+    unmapped_cells,
+)
+from gateforge.design import export_json
 from gateforge.graph import MaterialGraph
 from gateforge.hierarchy import (
     GeneratedHierarchyMode,
@@ -17,11 +24,8 @@ from gateforge.hierarchy import (
     PhysicalHierarchyPolicy,
     SynthesisHierarchyMode,
     SynthesisHierarchyPolicy,
-    apply_synthesis_hierarchy,
 )
 from gateforge.material import MaterialDesign
-from gateforge.mapping import Mapper, MappingProvider
-from gateforge.materialize import flatten_and_materialize
 from gateforge.placement import (
     PlacedDesign,
     TopologicalPlacementOptions,
@@ -29,249 +33,16 @@ from gateforge.placement import (
 )
 from gateforge.pipeline import MappingStage, default_mapping_stages
 from gateforge.provider import TargetProvider
-from gateforge.providers.lbp.common import LBP_PROVIDER
-from gateforge.providers.lbp.hierarchy import containerize_lbp_plan
-from gateforge.providers.lbp.associative import LBPAssociativeConeMapper
-from gateforge.providers.lbp.intrinsics import LBPIntrinsicMapper
+from gateforge.providers.lbp.export import build_lbp_plan
 from gateforge.providers.lbp.registers import (
-    LBPCoarseRegisterBankMapper,
     LBPRegisterStyle,
-    LBPScalarRegisterBankMapper,
 )
-from gateforge.providers.lbp.mappers import LBPCombinatorialLowLevelGateMapper
-from gateforge.providers.lbp.objects import make_lbp_provider
-from gateforge.providers.lbp.realize import realize_lbp_plan
 from gateforge.providers.lbp.toolkit import encode_lbp_toolkit_plan
 from gateforge.search import (
-    CompilationSearch,
     MappingSearchMode,
     MappingSearchOptions,
-    MappingSearchReport,
-    MappingSearchResult,
-    TerminalCandidateScore,
 )
-from gateforge.source import DesignSnapshot
-from gateforge.state import CompilationIntermediateState
-
-
-def design_preprocess(path: str) -> DesignContext:
-    context = DesignContext(ys.Design())
-    intrinsic_library = Path(__file__).parent / "intrinsics" / "gateforge_intrinsics.v"
-    context.run_pass(
-        f"read_verilog -lib {json.dumps(str(intrinsic_library.resolve()))}"
-    )
-    context.run_pass(f"read_verilog {json.dumps(os.path.abspath(path))}")
-    context.run_pass("hierarchy -check -auto-top")
-    context.run_pass("proc")
-    return context
-
-
-def unmapped_cells(design: DesignSnapshot) -> tuple[tuple[str, str, str], ...]:
-    residual: list[tuple[str, str, str]] = []
-    module_names = set(design.modules)
-    for module in design.modules.values():
-        if "blackbox" in module.attributes:
-            continue
-        for cell in module.cells.values():
-            if "gateforge_prefab" in cell.attributes:
-                continue
-            if cell.identifier.expected_type in module_names:
-                continue
-            if cell.identifier.expected_type == "$scopeinfo":
-                continue
-            residual.append(
-                (
-                    module.name,
-                    cell.identifier.name,
-                    cell.identifier.expected_type,
-                )
-            )
-    return tuple(sorted(residual))
-
-
-def compile_source(
-    path: str,
-    *,
-    stages: Sequence[MappingStage] | None = None,
-    mapping_providers: Sequence[MappingProvider] | None = None,
-    target_providers: Mapping[str, TargetProvider] | None = None,
-    synthesis_hierarchy: SynthesisHierarchyPolicy = SynthesisHierarchyPolicy(),
-    mapping_search: MappingSearchOptions = MappingSearchOptions(
-        mode=MappingSearchMode.GREEDY
-    ),
-) -> tuple[DesignContext, CompilationIntermediateState]:
-    if stages is None:
-        stages = default_mapping_stages()
-    if mapping_providers is None:
-        mapping_providers = _default_mapping_providers()
-    if target_providers is None:
-        target_providers = {LBP_PROVIDER: make_lbp_provider()}
-
-    result = _search_source(
-        path,
-        stages,
-        mapping_providers,
-        target_providers,
-        synthesis_hierarchy,
-        mapping_search,
-    )
-    winner = result.candidates[0]
-    return winner.restore_context(), winner.state
-
-
-def _search_source(
-    path: str,
-    stages: Sequence[MappingStage],
-    mapping_providers: Sequence[MappingProvider],
-    target_providers: Mapping[str, TargetProvider],
-    synthesis_hierarchy: SynthesisHierarchyPolicy,
-    mapping_search: MappingSearchOptions,
-) -> MappingSearchResult:
-    context = design_preprocess(path)
-    apply_synthesis_hierarchy(context, synthesis_hierarchy)
-    state = CompilationIntermediateState.empty(context.revision)
-    return CompilationSearch(
-        Mapper(mapping_providers),
-        target_providers,
-        mapping_search,
-    ).run(context, state, stages)
-
-
-def compile_material(
-    path: str,
-    *,
-    stages: Sequence[MappingStage] | None = None,
-    mapping_providers: Sequence[MappingProvider] | None = None,
-    target_providers: Mapping[str, TargetProvider] | None = None,
-    synthesis_hierarchy: SynthesisHierarchyPolicy = SynthesisHierarchyPolicy(),
-    mapping_search: MappingSearchOptions = MappingSearchOptions(
-        mode=MappingSearchMode.GREEDY
-    ),
-) -> tuple[DesignContext, CompilationIntermediateState, MaterialDesign]:
-    context, state, material, _ = compile_material_with_report(
-        path,
-        stages=stages,
-        mapping_providers=mapping_providers,
-        target_providers=target_providers,
-        synthesis_hierarchy=synthesis_hierarchy,
-        mapping_search=mapping_search,
-    )
-    return context, state, material
-
-
-def compile_material_with_report(
-    path: str,
-    *,
-    stages: Sequence[MappingStage] | None = None,
-    mapping_providers: Sequence[MappingProvider] | None = None,
-    target_providers: Mapping[str, TargetProvider] | None = None,
-    synthesis_hierarchy: SynthesisHierarchyPolicy = SynthesisHierarchyPolicy(),
-    mapping_search: MappingSearchOptions = MappingSearchOptions(
-        mode=MappingSearchMode.GREEDY
-    ),
-) -> tuple[
-    DesignContext,
-    CompilationIntermediateState,
-    MaterialDesign,
-    MappingSearchReport,
-]:
-    if stages is None:
-        stages = default_mapping_stages()
-    if mapping_providers is None:
-        mapping_providers = _default_mapping_providers()
-    if target_providers is None:
-        target_providers = {LBP_PROVIDER: make_lbp_provider()}
-    result = _search_source(
-        path,
-        stages,
-        mapping_providers,
-        target_providers,
-        synthesis_hierarchy,
-        mapping_search,
-    )
-    evaluated: list[
-        tuple[
-            tuple[float, int, str, str],
-            DesignContext,
-            CompilationIntermediateState,
-            MaterialDesign,
-            TerminalCandidateScore,
-        ]
-    ] = []
-    residual_details: list[str] = []
-    for candidate in result.candidates:
-        context = candidate.restore_context()
-        residual = unmapped_cells(context.snapshot())
-        if residual:
-            residual_details.extend(
-                f"{module}.{name} ({cell_type})"
-                for module, name, cell_type in residual
-            )
-            continue
-        state, material = flatten_and_materialize(
-            context,
-            candidate.state,
-            target_providers,
-        )
-        object_cost = sum(
-            target_providers[item.type.provider].material_object_cost(item)
-            for item in material.objects
-        )
-        terminal_score = TerminalCandidateScore(
-            candidate=candidate.identifier,
-            material_digest=material.get_digest().value,
-            provider_object_cost=object_cost,
-            object_count=len(material.objects),
-            decisions=candidate.decisions,
-        )
-        evaluated.append(
-            (
-                (
-                    object_cost,
-                    len(material.objects),
-                    material.get_digest().value,
-                    candidate.identifier.value,
-                ),
-                context,
-                state,
-                material,
-                terminal_score,
-            )
-        )
-    if not evaluated:
-        details = ", ".join(sorted(set(residual_details)))
-        raise RuntimeError(f"Design contains unmapped cells: {details}")
-    _, context, state, material, winner_score = min(
-        evaluated,
-        key=lambda item: item[0],
-    )
-    report = replace(
-        result.report,
-        terminal_scores=tuple(
-            sorted(
-                (item[4] for item in evaluated),
-                key=lambda item: item.candidate.value,
-            )
-        ),
-        winner=winner_score.candidate,
-    )
-    return context, state, material, report
-
-
-def _target_providers() -> dict[str, TargetProvider]:
-    return {LBP_PROVIDER: make_lbp_provider()}
-
-
-def _default_mapping_providers(
-    register_style: LBPRegisterStyle = LBPRegisterStyle.COMPACT,
-) -> tuple[MappingProvider, ...]:
-    return (
-        LBPIntrinsicMapper(),
-        LBPCoarseRegisterBankMapper(register_style),
-        LBPScalarRegisterBankMapper(register_style),
-        LBPAssociativeConeMapper(),
-        LBPCombinatorialLowLevelGateMapper(),
-    )
+from gateforge.visualization.build import build_visual_document
 
 
 def _add_placement_arguments(parser: argparse.ArgumentParser) -> None:
@@ -290,20 +61,37 @@ def _add_placement_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--row-pitch",
         type=float,
-        default=105.0,
-        help="Vertical spacing between subjects in a column.",
+        default=52.5,
+        help="Minimum vertical height reserved for a placed subject.",
     )
     parser.add_argument(
-        "--routing-group-size",
-        type=int,
-        default=5,
-        help="Number of content rows between aligned wire-routing gaps.",
+        "--routing-group-height",
+        type=float,
+        default=250.0,
+        help="Content height in world units between wire-routing gaps.",
     )
     parser.add_argument(
         "--routing-gap-rows",
         type=int,
         default=1,
         help="Number of empty rows reserved for each wire-routing gap.",
+    )
+    parser.add_argument(
+        "--physical-hierarchy",
+        choices=tuple(item.value for item in PhysicalHierarchyMode),
+        default=PhysicalHierarchyMode.FLAT.value,
+        help="Choose which HDL module occurrences become nested microchips.",
+    )
+    parser.add_argument(
+        "--hierarchy-threshold",
+        type=float,
+        help="Threshold used by min-objects or min-cost physical hierarchy.",
+    )
+    parser.add_argument(
+        "--generated-hierarchy",
+        choices=tuple(item.value for item in GeneratedHierarchyMode),
+        default=GeneratedHierarchyMode.AUTO.value,
+        help="Choose inline, automatic, or all generated implementation microchips.",
     )
 
 
@@ -319,10 +107,17 @@ def _place(
         TopologicalPlacementOptions(
             column_pitch=args.column_pitch,
             row_pitch=args.row_pitch,
-            routing_group_size=args.routing_group_size,
+            routing_group_height=args.routing_group_height,
             routing_gap_rows=args.routing_gap_rows,
         ),
         providers=providers,
+        physical_hierarchy=PhysicalHierarchyPolicy(
+            PhysicalHierarchyMode(args.physical_hierarchy),
+            args.hierarchy_threshold,
+        ),
+        generated_hierarchy=GeneratedHierarchyPolicy(
+            GeneratedHierarchyMode(args.generated_hierarchy),
+        ),
     )
     return placer.place(graph).finalize(graph)
 
@@ -334,24 +129,6 @@ def _load_json(path: Path) -> object:
             ValueError(f"Invalid JSON number {token}")
         ),
     )
-
-
-def _write_json(path: Path, value: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        text=True,
-    )
-    temporary_path = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, indent=4, allow_nan=False)
-            stream.write("\n")
-        os.replace(temporary_path, path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
 
 
 def _compile_command(args: argparse.Namespace) -> None:
@@ -409,18 +186,19 @@ def _place_command(args: argparse.Namespace) -> None:
         providers,
     )
     placed = _place(material, providers, args)
+    virtual_terminals = len(placed.subjects) - len(material.objects)
     if args.output is not None:
         _write_json(args.output, placed.canonical_data())
         print(
-            f"Placed {len(placed.placements.objects)} objects and "
-            f"{len(placed.placements.module_ports) + len(placed.placements.constants)} "
+            f"Placed {len(material.objects)} objects and "
+            f"{virtual_terminals} "
             "virtual terminals."
         )
         return
     print(json.dumps(placed.canonical_data(), indent=4, allow_nan=False))
     print(
-        f"Placed {len(placed.placements.objects)} objects and "
-        f"{len(placed.placements.module_ports) + len(placed.placements.constants)} "
+        f"Placed {len(material.objects)} objects and "
+        f"{virtual_terminals} "
         "virtual terminals.",
         file=sys.stderr,
     )
@@ -437,26 +215,14 @@ def _export_lbp_toolkit_command(args: argparse.Namespace) -> None:
         _load_json(args.placement),
         graph,
     )
-    plan = realize_lbp_plan(
+    plan = build_lbp_plan(
         material,
         graph,
         placed,
+        providers,
         title=args.title,
         description=args.description,
         creator=args.creator,
-    )
-    plan = containerize_lbp_plan(
-        plan,
-        material,
-        graph,
-        PhysicalHierarchyPolicy(
-            PhysicalHierarchyMode(args.physical_hierarchy),
-            args.hierarchy_threshold,
-        ),
-        providers,
-        GeneratedHierarchyPolicy(
-            GeneratedHierarchyMode(args.generated_hierarchy),
-        ),
     )
     _write_json(args.output, encode_lbp_toolkit_plan(plan))
     material_gadgets = sum(
@@ -470,6 +236,46 @@ def _export_lbp_toolkit_command(args: argparse.Namespace) -> None:
         f"{len(plan.connections)} connections on a "
         f"{plan.board_size.x:g} x {plan.board_size.y:g} circuit board."
     )
+
+
+def _visualize_command(args: argparse.Namespace) -> None:
+    def load_document():
+        providers = _target_providers()
+        material = MaterialDesign.from_canonical_data(
+            _load_json(args.material),
+            providers,
+        )
+        graph = MaterialGraph.from_design(material, providers)
+        placed = PlacedDesign.from_canonical_data(
+            _load_json(args.placement),
+            graph,
+        )
+        return build_visual_document(
+            material,
+            graph,
+            placed,
+            providers,
+        )
+
+    _launch_visualizer(
+        load_document(),
+        reload_document=load_document,
+        watch_paths=(args.material, args.placement),
+        watch=args.watch,
+    )
+
+
+def _launch_visualizer(document, **options) -> None:
+    try:
+        from gateforge.visualization.tk_app import launch_visualizer
+    except ModuleNotFoundError as error:
+        if error.name != "tkinter":
+            raise
+        raise RuntimeError(
+            "Tkinter is required for visualization; install the python3-tk package"
+        ) from error
+
+    launch_visualizer(document, **options)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -594,22 +400,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--creator",
         help="Override creator and creation-history metadata.",
     )
-    toolkit_parser.add_argument(
-        "--physical-hierarchy",
-        choices=tuple(item.value for item in PhysicalHierarchyMode),
-        default=PhysicalHierarchyMode.FLAT.value,
-        help="Choose which HDL module occurrences become nested microchips.",
+    visualize_parser = subparsers.add_parser(
+        "visualize",
+        help="Inspect material placement and provider-realized scenes.",
     )
-    toolkit_parser.add_argument(
-        "--hierarchy-threshold",
-        type=float,
-        help="Threshold used by min-objects or min-cost physical hierarchy.",
-    )
-    toolkit_parser.add_argument(
-        "--generated-hierarchy",
-        choices=tuple(item.value for item in GeneratedHierarchyMode),
-        default=GeneratedHierarchyMode.AUTO.value,
-        help="Choose inline, automatic, or all generated implementation microchips.",
+    visualize_parser.add_argument("material", type=Path)
+    visualize_parser.add_argument("placement", type=Path)
+    visualize_parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Reload automatically when either input artifact changes.",
     )
 
     args = parser.parse_args(argv)
@@ -621,6 +421,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             _place_command(args)
         elif args.command == "export" and args.export_format == "lbp-toolkit":
             _export_lbp_toolkit_command(args)
+        elif args.command == "visualize":
+            _visualize_command(args)
         else:
             raise ValueError(f"Unknown export format {args.export_format!r}")
     except (OSError, RuntimeError, ValueError) as error:

@@ -13,10 +13,9 @@ from gateforge.hierarchy import (
 from gateforge.material import ImplementationPackaging
 from gateforge.placement import TopologicalPlacer
 from gateforge.providers.lbp.common import LBP_PROVIDER
-from gateforge.providers.lbp.hierarchy import containerize_lbp_plan
+from gateforge.providers.lbp.export import build_lbp_plan
 from gateforge.providers.lbp.objects import make_lbp_provider
 from gateforge.providers.lbp.plan import LbpThingKind
-from gateforge.providers.lbp.realize import realize_lbp_plan
 from gateforge.providers.lbp.toolkit import encode_lbp_toolkit_plan
 
 
@@ -50,22 +49,20 @@ class LbpHierarchyTests(unittest.TestCase):
             target_providers=cls.providers,
         )
         cls.graph = MaterialGraph.from_design(cls.material, cls.providers)
-        cls.placed = TopologicalPlacer(providers=cls.providers).place(
-            cls.graph
-        ).finalize(cls.graph)
-        cls.flat_plan = realize_lbp_plan(cls.material, cls.graph, cls.placed)
-
-    def _containerize(self, policy: PhysicalHierarchyPolicy):
-        return containerize_lbp_plan(
-            self.flat_plan,
+    def _build(self, policy: PhysicalHierarchyPolicy):
+        placed = TopologicalPlacer(
+            providers=self.providers,
+            physical_hierarchy=policy,
+        ).place(self.graph).finalize(self.graph)
+        return build_lbp_plan(
             self.material,
             self.graph,
-            policy,
+            placed,
             self.providers,
         )
 
     def test_preserve_all_retains_every_module_occurrence(self) -> None:
-        plan = self._containerize(
+        plan = self._build(
             PhysicalHierarchyPolicy(PhysicalHierarchyMode.PRESERVE_ALL)
         )
         hierarchy = plan.hierarchy
@@ -84,7 +81,7 @@ class LbpHierarchyTests(unittest.TestCase):
             self.assertEqual(len(child.gadgets), 1)
 
     def test_nested_routes_use_one_based_chip_inputs_and_zero_based_board_ports(self) -> None:
-        plan = self._containerize(
+        plan = self._build(
             PhysicalHierarchyPolicy(PhysicalHierarchyMode.PRESERVE_ALL)
         )
         hierarchy = plan.hierarchy
@@ -128,7 +125,7 @@ class LbpHierarchyTests(unittest.TestCase):
         )
 
     def test_preserve_all_encodes_nested_microchip_ownership_and_ports(self) -> None:
-        plan = self._containerize(
+        plan = self._build(
             PhysicalHierarchyPolicy(PhysicalHierarchyMode.PRESERVE_ALL)
         )
         encoded = encode_lbp_toolkit_plan(plan)
@@ -170,14 +167,14 @@ class LbpHierarchyTests(unittest.TestCase):
             )
 
     def test_min_objects_collapses_small_child_modules(self) -> None:
-        plan = self._containerize(
+        plan = self._build(
             PhysicalHierarchyPolicy(PhysicalHierarchyMode.MIN_OBJECTS, 2)
         )
 
         self.assertIsNone(plan.hierarchy)
 
     def test_min_objects_one_retains_child_modules(self) -> None:
-        plan = self._containerize(
+        plan = self._build(
             PhysicalHierarchyPolicy(PhysicalHierarchyMode.MIN_OBJECTS, 1)
         )
 
@@ -193,17 +190,16 @@ class LbpHierarchyTests(unittest.TestCase):
             implementations=(implementation, *self.material.implementations[1:]),
         )
         graph = MaterialGraph.from_design(material, self.providers)
-        placed = TopologicalPlacer(providers=self.providers).place(graph).finalize(graph)
-        flat_plan = realize_lbp_plan(material, graph, placed)
-
-        plan = containerize_lbp_plan(
-            flat_plan,
-            material,
-            graph,
-            PhysicalHierarchyPolicy(PhysicalHierarchyMode.FLAT),
-            self.providers,
-            GeneratedHierarchyPolicy(GeneratedHierarchyMode.AUTO),
-        )
+        placed = TopologicalPlacer(
+            providers=self.providers,
+            physical_hierarchy=PhysicalHierarchyPolicy(
+                PhysicalHierarchyMode.FLAT
+            ),
+            generated_hierarchy=GeneratedHierarchyPolicy(
+                GeneratedHierarchyMode.AUTO
+            ),
+        ).place(graph).finalize(graph)
+        plan = build_lbp_plan(material, graph, placed, self.providers)
 
         hierarchy = plan.hierarchy
         self.assertIsNotNone(hierarchy)
@@ -221,6 +217,32 @@ class LbpHierarchyTests(unittest.TestCase):
             )
             for identifier in implementation.objects
         })
+
+    def test_placement_selected_hierarchy_exports_without_reflow(self) -> None:
+        placed = TopologicalPlacer(
+            providers=self.providers,
+            physical_hierarchy=PhysicalHierarchyPolicy(
+                PhysicalHierarchyMode.PRESERVE_ALL
+            ),
+        ).place(self.graph).finalize(self.graph)
+        before = placed.canonical_data()
+
+        plan = build_lbp_plan(self.material, self.graph, placed, self.providers)
+
+        self.assertEqual(placed.canonical_data(), before)
+        self.assertIsNotNone(plan.hierarchy)
+        assert plan.hierarchy is not None
+        self.assertEqual(
+            {item.path for item in plan.hierarchy.containers},
+            {item.path for item in placed.containers},
+        )
+        for exported in plan.hierarchy.containers:
+            source = placed.container(exported.path)
+            self.assertEqual((exported.x, exported.y), (source.x, source.y))
+            self.assertEqual(
+                (exported.board_size.x, exported.board_size.y),
+                (source.board.max_x, source.board.max_y),
+            )
 
 
 if __name__ == "__main__":

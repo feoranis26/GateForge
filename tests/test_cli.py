@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from gateforge.gateforge import main
 
@@ -128,6 +129,32 @@ class CliTests(unittest.TestCase):
         self.assertIn("6 material objects", details["description"])
         self.assertIn("Exported 6 material gadgets", stdout.getvalue())
 
+    @patch("gateforge.gateforge._launch_visualizer")
+    def test_visualize_builds_registered_provider_views_without_opening_tk(
+        self,
+        launch_visualizer,
+    ) -> None:
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            main(
+                [
+                    "visualize",
+                    str(self.material_path),
+                    str(self.one_shot_path),
+                    "--watch",
+                ]
+            )
+
+        document = launch_visualizer.call_args.args[0]
+        self.assertEqual(
+            {view.identifier for view in document.views},
+            {"material", "lbp:realized"},
+        )
+        self.assertTrue(launch_visualizer.call_args.kwargs["watch"])
+        self.assertEqual(
+            launch_visualizer.call_args.kwargs["watch_paths"],
+            (self.material_path, self.one_shot_path),
+        )
+
     def test_lbp_toolkit_export_applies_metadata_overrides_deterministically(self) -> None:
         first = Path(self.directory.name) / "first-object.json"
         second = Path(self.directory.name) / "second-object.json"
@@ -210,6 +237,8 @@ class CliTests(unittest.TestCase):
                     str(material),
                     "--emit-placement",
                     str(placement),
+                    "--physical-hierarchy",
+                    "preserve-all",
                 ]
             )
             main(
@@ -218,8 +247,6 @@ class CliTests(unittest.TestCase):
                     "lbp-toolkit",
                     str(material),
                     str(placement),
-                    "--physical-hierarchy",
-                    "preserve-all",
                     "--output",
                     str(output),
                 ]

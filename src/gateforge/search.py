@@ -12,6 +12,7 @@ from gateforge.claims import accept_mapping_proposals
 from gateforge.design import DesignCheckpoint, DesignContext
 from gateforge.mapping import (
     Mapper,
+    MappingProposal,
     ProposalConflictGraph,
     ProposalSetEnumerator,
 )
@@ -28,6 +29,12 @@ class MappingSearchMode(StrEnum):
     GREEDY = "greedy"
     BEAM = "beam"
     EXHAUSTIVE = "exhaustive"
+
+
+class SearchCandidateStatus(StrEnum):
+    FRONTIER = "frontier"
+    PRUNED = "pruned"
+    DEDUPLICATED = "deduplicated"
 
 
 class MappingSearchStage(Protocol):
@@ -176,6 +183,82 @@ class MappingSearchResult:
     report: MappingSearchReport
 
 
+@dataclass(frozen=True, slots=True)
+class MappingProposalSummary:
+    fingerprint: str
+    provider: str
+    mapper: str
+    rule: str
+    rule_version: int
+    cells: tuple[tuple[str, str, str], ...]
+    disposition: str
+    priority: int
+    score: int
+    lower_bound: float
+    expected_cost: float
+    implementation_name: str
+    packaging: str
+
+    @classmethod
+    def from_proposal(cls, proposal: MappingProposal) -> "MappingProposalSummary":
+        return cls(
+            fingerprint=proposal.fingerprint(),
+            provider=proposal.provider,
+            mapper=proposal.mapper,
+            rule=proposal.rule,
+            rule_version=proposal.rule_version,
+            cells=tuple(
+                (identifier.module, identifier.name, identifier.expected_type)
+                for identifier in sorted(proposal.ids)
+            ),
+            disposition=proposal.disposition.value,
+            priority=proposal.priority,
+            score=proposal.score,
+            lower_bound=proposal.cost.lower_bound,
+            expected_cost=proposal.cost.expected,
+            implementation_name=proposal.implementation_name,
+            packaging=proposal.packaging.value,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MappingCandidateTransition:
+    source: CompilationCandidateId
+    candidate: CompilationCandidate
+    status: SearchCandidateStatus
+
+
+@dataclass(frozen=True, slots=True)
+class MappingCandidateExpansion:
+    source: CompilationCandidate
+    post_pass_checkpoint: DesignCheckpoint
+    proposals: tuple[MappingProposalSummary, ...]
+    transitions: tuple[MappingCandidateTransition, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MappingSearchStageHistory:
+    stage: str
+    report: MappingSearchStageReport
+    expansions: tuple[MappingCandidateExpansion, ...]
+
+    @property
+    def transitions(self) -> tuple[MappingCandidateTransition, ...]:
+        return tuple(
+            transition
+            for expansion in self.expansions
+            for transition in expansion.transitions
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpandedCandidate:
+    source: CompilationCandidate
+    post_pass_checkpoint: DesignCheckpoint
+    proposals: tuple[MappingProposalSummary, ...]
+    candidates: tuple[CompilationCandidate, ...]
+
+
 def residual_cells(snapshot: DesignSnapshot) -> frozenset[CellIdentifier]:
     module_names = set(snapshot.modules)
     return frozenset(
@@ -206,59 +289,22 @@ class CompilationSearch:
         state: CompilationIntermediateState,
         stages: Sequence[MappingSearchStage],
     ) -> MappingSearchResult:
-        if context.revision != state.revision:
-            raise ValueError(
-                f"State revision {state.revision} does not match design revision "
-                f"{context.revision}"
-            )
-        frontier = (
-            CompilationCandidate(
-                checkpoint=context.checkpoint(),
-                state=state,
-            ),
-        )
-        reports: list[MappingSearchStageReport] = []
-        for stage_index, stage in enumerate(stages):
-            generated = tuple(
-                candidate
-                for source in frontier
-                for candidate in self._expand_candidate(
-                    source,
-                    stage,
-                    stage_index == len(stages) - 1,
-                )
-            )
-            deduplicated = self._deduplicate(generated)
-            ordered = tuple(sorted(deduplicated, key=self._candidate_order))
-            if self.options.mode == MappingSearchMode.BEAM:
-                next_frontier = ordered[: self.options.beam_width]
-            elif self.options.mode == MappingSearchMode.GREEDY:
-                next_frontier = ordered[:1]
-            else:
-                next_frontier = ordered
-            reports.append(
-                MappingSearchStageReport(
-                    stage=stage.name,
-                    input_candidates=len(frontier),
-                    generated_candidates=len(generated),
-                    deduplicated_candidates=len(generated) - len(deduplicated),
-                    pruned_candidates=len(ordered) - len(next_frontier),
-                    output_candidates=len(next_frontier),
-                )
-            )
-            if not next_frontier:
-                raise MappingSearchError(
-                    f"Mapping search produced no candidates at stage {stage.name!r}"
-                )
-            frontier = next_frontier
-        return MappingSearchResult(frontier, MappingSearchReport(tuple(reports)))
+        return self.start(context, state, stages).finish()
+
+    def start(
+        self,
+        context: DesignContext,
+        state: CompilationIntermediateState,
+        stages: Sequence[MappingSearchStage],
+    ) -> "CompilationSearchSession":
+        return CompilationSearchSession(self, context, state, stages)
 
     def _expand_candidate(
         self,
         candidate: CompilationCandidate,
         stage: MappingSearchStage,
         terminal: bool,
-    ) -> tuple[CompilationCandidate, ...]:
+    ) -> _ExpandedCandidate:
         context = candidate.restore_context()
         state = candidate.state
         for command in stage.passes:
@@ -327,7 +373,12 @@ class CompilationSearch:
                     + sum(proposal.cost.expected for proposal in selected),
                 )
             )
-        return tuple(expanded)
+        return _ExpandedCandidate(
+            source=candidate,
+            post_pass_checkpoint=post_pass_checkpoint,
+            proposals=tuple(MappingProposalSummary.from_proposal(item) for item in proposals),
+            candidates=tuple(expanded),
+        )
 
     @staticmethod
     def _candidate_order(
@@ -352,3 +403,125 @@ class CompilationSearch:
             ):
                 unique[candidate.identifier] = candidate
         return tuple(unique.values())
+
+
+class CompilationSearchSession:
+    def __init__(
+        self,
+        search: CompilationSearch,
+        context: DesignContext,
+        state: CompilationIntermediateState,
+        stages: Sequence[MappingSearchStage],
+    ) -> None:
+        if context.revision != state.revision:
+            raise ValueError(
+                f"State revision {state.revision} does not match design revision "
+                f"{context.revision}"
+            )
+        self.search = search
+        self.stages = tuple(stages)
+        self.stage_index = 0
+        self.frontier = (
+            CompilationCandidate(
+                checkpoint=context.checkpoint(),
+                state=state,
+            ),
+        )
+        self._reports: list[MappingSearchStageReport] = []
+        self._history: list[MappingSearchStageHistory] = []
+
+    @property
+    def complete(self) -> bool:
+        return self.stage_index == len(self.stages)
+
+    @property
+    def reports(self) -> tuple[MappingSearchStageReport, ...]:
+        return tuple(self._reports)
+
+    @property
+    def history(self) -> tuple[MappingSearchStageHistory, ...]:
+        return tuple(self._history)
+
+    def advance_stage(self) -> MappingSearchStageHistory:
+        if self.complete:
+            raise MappingSearchError("Mapping search has no remaining stages")
+        stage = self.stages[self.stage_index]
+        expansions = tuple(
+            self.search._expand_candidate(
+                source,
+                stage,
+                self.stage_index == len(self.stages) - 1,
+            )
+            for source in self.frontier
+        )
+        generated = tuple(
+            candidate
+            for expansion in expansions
+            for candidate in expansion.candidates
+        )
+        deduplicated = self.search._deduplicate(generated)
+        ordered = tuple(sorted(deduplicated, key=self.search._candidate_order))
+        if self.search.options.mode == MappingSearchMode.BEAM:
+            next_frontier = ordered[: self.search.options.beam_width]
+        elif self.search.options.mode == MappingSearchMode.GREEDY:
+            next_frontier = ordered[:1]
+        else:
+            next_frontier = ordered
+        report = MappingSearchStageReport(
+            stage=stage.name,
+            input_candidates=len(self.frontier),
+            generated_candidates=len(generated),
+            deduplicated_candidates=len(generated) - len(deduplicated),
+            pruned_candidates=len(ordered) - len(next_frontier),
+            output_candidates=len(next_frontier),
+        )
+        representative_objects = {id(candidate) for candidate in deduplicated}
+        frontier_objects = {id(candidate) for candidate in next_frontier}
+        history = MappingSearchStageHistory(
+            stage=stage.name,
+            report=report,
+            expansions=tuple(
+                MappingCandidateExpansion(
+                    source=expansion.source,
+                    post_pass_checkpoint=expansion.post_pass_checkpoint,
+                    proposals=expansion.proposals,
+                    transitions=tuple(
+                        MappingCandidateTransition(
+                            source=expansion.source.identifier,
+                            candidate=candidate,
+                            status=(
+                                SearchCandidateStatus.DEDUPLICATED
+                                if id(candidate) not in representative_objects
+                                else SearchCandidateStatus.FRONTIER
+                                if id(candidate) in frontier_objects
+                                else SearchCandidateStatus.PRUNED
+                            ),
+                        )
+                        for candidate in expansion.candidates
+                    ),
+                )
+                for expansion in expansions
+            ),
+        )
+        self._reports.append(report)
+        self._history.append(history)
+        if not next_frontier:
+            raise MappingSearchError(
+                f"Mapping search produced no candidates at stage {stage.name!r}"
+            )
+        self.frontier = next_frontier
+        self.stage_index += 1
+        return history
+
+    def result(self) -> MappingSearchResult:
+        if not self.complete:
+            raise MappingSearchError("Mapping search has unfinished stages")
+        return MappingSearchResult(
+            self.frontier,
+            MappingSearchReport(tuple(self._reports)),
+        )
+
+    def finish(self) -> MappingSearchResult:
+        while not self.complete:
+            self.advance_stage()
+        return self.result()

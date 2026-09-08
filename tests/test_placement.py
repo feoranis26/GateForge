@@ -1,46 +1,22 @@
 from copy import deepcopy
+from dataclasses import replace
 import unittest
 
-from gateforge.graph import ConstantSubject, MaterialGraph, ModulePortSubject, ObjectSubject
+from gateforge.graph import MaterialGraph, ObjectSubject
 from gateforge.material import MaterialDesignDigest
 from gateforge.placement import (
-    ConstantPlacement,
-    FlatPlacementProposal,
-    ModulePortPlacement,
-    ObjectPlacement,
+    PhysicalEndpoint,
+    PhysicalEndpointKind,
     PlacedDesign,
     PlacementError,
     PlacementOptions,
     PlacementProvenance,
-    ResolvedPlacements,
+    ResolvedPlacementProposal,
+    TopologicalPlacer,
 )
 from gateforge.providers.lbp.common import LBP_PROVIDER
 from gateforge.providers.lbp.objects import make_lbp_provider
 from tests.test_graph import _lbp_inverter_design
-
-
-def _resolved(graph: MaterialGraph) -> ResolvedPlacements:
-    objects = []
-    module_ports = []
-    constants = []
-    for index, subject in enumerate(graph.subjects):
-        x = float(index - 1)
-        if isinstance(subject, ObjectSubject):
-            objects.append(ObjectPlacement(subject.object, x, 0.0))
-        elif isinstance(subject, ModulePortSubject):
-            module_ports.append(
-                ModulePortPlacement(
-                    subject.module,
-                    subject.port,
-                    subject.bit,
-                    subject.direction,
-                    x,
-                    1.0,
-                )
-            )
-        elif isinstance(subject, ConstantSubject):
-            constants.append(ConstantPlacement(subject.net, subject.value, x, -1.0))
-    return ResolvedPlacements(tuple(objects), tuple(module_ports), tuple(constants))
 
 
 class PlacementModelTests(unittest.TestCase):
@@ -54,10 +30,12 @@ class PlacementModelTests(unittest.TestCase):
             1,
             PlacementOptions.from_canonical_data({"row_pitch": 2, "mode": "flat"}),
         )
-        self.proposal = FlatPlacementProposal(
-            self.graph.design.get_digest(),
-            self.provenance,
-            _resolved(self.graph),
+        placed = TopologicalPlacer(
+            providers={LBP_PROVIDER: make_lbp_provider()}
+        ).place(self.graph).finalize(self.graph)
+        self.placed = replace(placed, provenance=self.provenance)
+        self.proposal = ResolvedPlacementProposal(
+            self.placed,
         )
 
     def test_complete_proposal_finalizes_and_round_trips(self) -> None:
@@ -75,38 +53,61 @@ class PlacementModelTests(unittest.TestCase):
             '{"mode":"flat","row_pitch":2}',
         )
 
-    def test_bounds_cover_objects_and_virtual_terminals(self) -> None:
+    def test_bounds_are_the_root_physical_board(self) -> None:
         placed = self.proposal.finalize(self.graph)
 
-        self.assertEqual(placed.bounds.min_x, -1.0)
-        self.assertEqual(placed.bounds.max_x, 1.0)
-        self.assertEqual(placed.bounds.min_y, -1.0)
-        self.assertEqual(placed.bounds.max_y, 1.0)
+        self.assertEqual(placed.bounds, placed.root_container.board)
+        for prefab in placed.prefabs:
+            self.assertLessEqual(placed.bounds.min_x, prefab.x + prefab.bounds.min_x)
+            self.assertLessEqual(placed.bounds.min_y, prefab.y + prefab.bounds.min_y)
+            self.assertGreaterEqual(placed.bounds.max_x, prefab.x + prefab.bounds.max_x)
+            self.assertGreaterEqual(placed.bounds.max_y, prefab.y + prefab.bounds.max_y)
 
-    def test_decoder_normalizes_placement_array_order(self) -> None:
+    def test_decoder_normalizes_container_array_order(self) -> None:
         graph = MaterialGraph.from_design(
             _lbp_inverter_design(),
             {LBP_PROVIDER: make_lbp_provider()},
         )
-        proposal = FlatPlacementProposal(
-            graph.design.get_digest(),
-            self.provenance,
-            _resolved(graph),
-        )
-        placed = proposal.finalize(graph)
+        placed = TopologicalPlacer(
+            providers={LBP_PROVIDER: make_lbp_provider()}
+        ).place(graph).finalize(graph)
         data = placed.canonical_data()
-        data["module_ports"].reverse()
+        containers = data["containers"]
+        assert isinstance(containers, list)
+        container = containers[0]
+        assert isinstance(container, dict)
+        components = container["components"]
+        prefabs = container["prefabs"]
+        assert isinstance(components, list)
+        assert isinstance(prefabs, list)
+        components.reverse()
+        prefabs.reverse()
 
         restored = PlacedDesign.from_canonical_data(data, graph)
 
         self.assertEqual(restored, placed)
 
     def test_finalization_rejects_missing_subject(self) -> None:
-        resolved = _resolved(self.graph)
-        incomplete = FlatPlacementProposal(
-            self.graph.design.get_digest(),
-            self.provenance,
-            ResolvedPlacements((), resolved.module_ports, resolved.constants),
+        root = self.placed.root_container
+        removed = next(
+            item for item in root.prefabs if isinstance(item.source, ObjectSubject)
+        )
+        incomplete_root = replace(
+            root,
+            prefabs=tuple(item for item in root.prefabs if item != removed),
+            components=tuple(
+                item
+                for item in root.components
+                if item.identifier not in removed.components
+            ),
+            annotations=tuple(
+                item
+                for item in root.annotations
+                if item.identifier not in removed.annotations
+            ),
+        )
+        incomplete = ResolvedPlacementProposal(
+            replace(self.placed, containers=(incomplete_root,)),
         )
 
         self.assertFalse(incomplete.is_complete(self.graph))
@@ -114,10 +115,11 @@ class PlacementModelTests(unittest.TestCase):
             incomplete.finalize(self.graph)
 
     def test_finalization_rejects_wrong_material_digest(self) -> None:
-        proposal = FlatPlacementProposal(
-            MaterialDesignDigest("f" * 64),
-            self.provenance,
-            _resolved(self.graph),
+        proposal = ResolvedPlacementProposal(
+            replace(
+                self.placed,
+                material_digest=MaterialDesignDigest("f" * 64),
+            )
         )
 
         with self.assertRaises(PlacementError):
@@ -131,16 +133,113 @@ class PlacementModelTests(unittest.TestCase):
             PlacedDesign.from_canonical_data(data, self.graph)
 
     def test_nonfinite_transform_is_rejected(self) -> None:
-        object_id = self.graph.design.objects[0].identifier
-
         with self.assertRaises(PlacementError):
-            ObjectPlacement(object_id, float("inf"), 0.0)
+            replace(self.placed.components[0], x=float("inf"))
 
     def test_duplicate_subject_placement_is_rejected(self) -> None:
-        placement = ObjectPlacement(self.graph.design.objects[0].identifier, 0.0, 0.0)
+        root = self.placed.root_container
+        prefab = next(
+            item for item in root.prefabs if isinstance(item.source, ObjectSubject)
+        )
+        component = next(
+            item for item in root.components if item.identifier in prefab.components
+        )
+        duplicate_component = replace(
+            component,
+            identifier=f"{component.identifier}:duplicate",
+        )
+        duplicate = replace(
+            prefab,
+            identifier=f"{prefab.identifier}:duplicate",
+            components=(duplicate_component.identifier,),
+        )
+        proposal = ResolvedPlacementProposal(
+            replace(
+                self.placed,
+                containers=(
+                    replace(
+                        root,
+                        components=(*root.components, duplicate_component),
+                        prefabs=(*root.prefabs, duplicate),
+                    ),
+                ),
+            )
+        )
 
-        with self.assertRaises(PlacementError):
-            ResolvedPlacements((placement, placement), (), ())
+        with self.assertRaisesRegex(PlacementError, "duplicate material subjects"):
+            proposal.finalize(self.graph)
+
+    def test_component_cannot_belong_to_multiple_prefabs(self) -> None:
+        root = self.placed.root_container
+        first, second = root.prefabs[:2]
+        shared = replace(
+            second,
+            components=(*second.components, first.components[0]),
+        )
+
+        with self.assertRaisesRegex(PlacementError, "multiple prefabs"):
+            replace(
+                root,
+                prefabs=tuple(
+                    shared if item == second else item for item in root.prefabs
+                ),
+            )
+
+    def test_component_source_must_match_owning_prefab(self) -> None:
+        root = self.placed.root_container
+        prefab = root.prefabs[0]
+        component = next(
+            item for item in root.components if item.identifier in prefab.components
+        )
+        other_source = next(item.source for item in root.prefabs if item != prefab)
+
+        with self.assertRaisesRegex(PlacementError, "source differs"):
+            changed = replace(component, source=other_source)
+            replace(
+                root,
+                components=tuple(
+                    changed if item == component else item for item in root.components
+                ),
+            )
+
+    def test_component_must_remain_inside_its_prefab(self) -> None:
+        root = self.placed.root_container
+        component = root.components[0]
+        moved = replace(component, x=root.board.max_x + 1000.0)
+
+        with self.assertRaisesRegex(PlacementError, "outside prefab"):
+            replace(
+                root,
+                components=tuple(
+                    moved if item == component else item for item in root.components
+                ),
+            )
+
+    def test_connection_endpoint_must_exist_in_its_container(self) -> None:
+        root = self.placed.root_container
+        connection = root.connections[0]
+        broken = replace(
+            connection,
+            source=PhysicalEndpoint(
+                PhysicalEndpointKind.COMPONENT,
+                "missing-component",
+                0,
+            ),
+        )
+        proposal = ResolvedPlacementProposal(
+            replace(
+                self.placed,
+                containers=(
+                    replace(
+                        root,
+                        connections=(broken, *root.connections[1:]),
+                    ),
+                ),
+            )
+        )
+
+        with self.assertRaisesRegex(PlacementError, "missing component"):
+            proposal.finalize(self.graph)
 
 
 if __name__ == "__main__":

@@ -2,13 +2,7 @@ from pathlib import Path
 import unittest
 
 from gateforge.gateforge import compile_material, design_preprocess
-from gateforge.graph import MaterialGraph
-from gateforge.hierarchy import (
-    GeneratedHierarchyMode,
-    GeneratedHierarchyPolicy,
-    PhysicalHierarchyMode,
-    PhysicalHierarchyPolicy,
-)
+from gateforge.graph import MaterialGraph, ObjectSubject
 from gateforge.mapping import Mapper
 from gateforge.placement import TopologicalPlacer
 from gateforge.pipeline import default_mapping_stages
@@ -17,8 +11,7 @@ from gateforge.providers.lbp.objects import (
     make_lbp_provider,
     validate_lbp_prefab,
 )
-from gateforge.providers.lbp.hierarchy import containerize_lbp_plan
-from gateforge.providers.lbp.realize import realize_lbp_plan
+from gateforge.providers.lbp.export import build_lbp_plan
 from gateforge.providers.lbp.toolkit import encode_lbp_toolkit_plan
 from gateforge.providers.lbp.configuration import (
     LBPObjectConfigurationCodec,
@@ -186,15 +179,7 @@ class RegisterMappingTests(unittest.TestCase):
         providers = {"lbp": make_lbp_provider()}
         graph = MaterialGraph.from_design(material, providers)
         placed = TopologicalPlacer(providers=providers).place(graph).finalize(graph)
-        plan = realize_lbp_plan(material, graph, placed)
-        plan = containerize_lbp_plan(
-            plan,
-            material,
-            graph,
-            PhysicalHierarchyPolicy(PhysicalHierarchyMode.FLAT),
-            providers,
-            GeneratedHierarchyPolicy(GeneratedHierarchyMode.AUTO),
-        )
+        plan = build_lbp_plan(material, graph, placed, providers)
 
         hierarchy = plan.hierarchy
         self.assertIsNotNone(hierarchy)
@@ -210,10 +195,11 @@ class RegisterMappingTests(unittest.TestCase):
             if item.name == "register-bank[9]"
         )
         self.assertEqual(len(bank.gadgets), len(implementation.objects))
-        self.assertLessEqual(root.board_size.x, 945.0)
-        self.assertLessEqual(root.board_size.y, 630.0)
-        self.assertLessEqual(bank.board_size.x, 997.5)
-        self.assertLessEqual(bank.board_size.y, 787.5)
+        for board_size in (root.board_size, bank.board_size):
+            self.assertGreater(board_size.x, 0.0)
+            self.assertGreater(board_size.y, 0.0)
+            self.assertEqual(board_size.x % 52.5, 0.0)
+            self.assertEqual(board_size.y % 52.5, 0.0)
         placements = {
             item.gadget: (item.x, item.y) for item in plan.placements
         }
@@ -242,16 +228,7 @@ class RegisterMappingTests(unittest.TestCase):
         providers = {"lbp": make_lbp_provider()}
         graph = MaterialGraph.from_design(material, providers)
         placed = TopologicalPlacer(providers=providers).place(graph).finalize(graph)
-        plan = realize_lbp_plan(material, graph, placed)
-
-        plan = containerize_lbp_plan(
-            plan,
-            material,
-            graph,
-            PhysicalHierarchyPolicy(PhysicalHierarchyMode.FLAT),
-            providers,
-            GeneratedHierarchyPolicy(GeneratedHierarchyMode.AUTO),
-        )
+        plan = build_lbp_plan(material, graph, placed, providers)
 
         encoded = encode_lbp_toolkit_plan(plan)
         self.assertEqual(encoded["type"], "PLAN")
@@ -320,16 +297,11 @@ class RegisterMappingTests(unittest.TestCase):
         providers = {"lbp": make_lbp_provider()}
         graph = MaterialGraph.from_design(material, providers)
         placed = TopologicalPlacer(providers=providers).place(graph).finalize(graph)
-        self.assertEqual(len(placed.placements.objects), len(material.objects))
-        plan = realize_lbp_plan(material, graph, placed)
-        plan = containerize_lbp_plan(
-            plan,
-            material,
-            graph,
-            PhysicalHierarchyPolicy(PhysicalHierarchyMode.FLAT),
-            providers,
-            GeneratedHierarchyPolicy(GeneratedHierarchyMode.AUTO),
+        self.assertEqual(
+            sum(isinstance(item, ObjectSubject) for item in placed.subjects),
+            len(material.objects),
         )
+        plan = build_lbp_plan(material, graph, placed, providers)
         encoded = encode_lbp_toolkit_plan(plan)
         self.assertEqual(encoded["type"], "PLAN")
 

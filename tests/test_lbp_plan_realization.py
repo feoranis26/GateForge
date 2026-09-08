@@ -7,7 +7,7 @@ from gateforge.material import (
     MaterialModulePortRef,
     MaterialObjectPortRef,
 )
-from gateforge.placement import TopologicalPlacer
+from gateforge.placement import PlacementError, TopologicalPlacer
 from gateforge.providers.lbp.common import LBP_PROVIDER, LBP_WIRE
 from gateforge.providers.lbp.objects import make_lbp_provider
 from gateforge.providers.lbp.plan import (
@@ -15,7 +15,7 @@ from gateforge.providers.lbp.plan import (
     LbpGadgetSource,
     LbpPlanRealizationError,
 )
-from gateforge.providers.lbp.realize import realize_lbp_plan
+from gateforge.providers.lbp.export import build_lbp_plan
 from gateforge.providers.lbp.types import (
     LBPAndGateType,
     LBPNotGateType,
@@ -31,8 +31,8 @@ PROVIDERS = {LBP_PROVIDER: make_lbp_provider()}
 
 def _realize(design: MaterialDesign, **metadata):
     graph = MaterialGraph.from_design(design, PROVIDERS)
-    placed = TopologicalPlacer().place(graph).finalize(graph)
-    return realize_lbp_plan(design, graph, placed, **metadata)
+    placed = TopologicalPlacer(providers=PROVIDERS).place(graph).finalize(graph)
+    return build_lbp_plan(design, graph, placed, PROVIDERS, **metadata)
 
 
 class LbpPlanRealizationTests(unittest.TestCase):
@@ -234,7 +234,7 @@ class LbpPlanRealizationTests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaisesRegex(LbpPlanRealizationError, "constant 'x'"):
+        with self.assertRaisesRegex(PlacementError, "constant 'x'"):
             _realize(design)
 
     def test_metadata_and_board_size_use_selected_defaults(self) -> None:

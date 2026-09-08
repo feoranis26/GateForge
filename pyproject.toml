@@ -8,6 +8,11 @@ dependencies = [
     "pyosys==0.68",
 ]
 
+[project.optional-dependencies]
+workbench = [
+    "PySide6>=6.8,<7",
+]
+
 [project.scripts]
 gateforge = "gateforge:main"
 

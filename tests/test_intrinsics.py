@@ -14,7 +14,7 @@ from gateforge.providers.lbp.configuration import (
 )
 from gateforge.providers.lbp.objects import make_lbp_provider
 from gateforge.providers.lbp.plan import LbpGadgetKind
-from gateforge.providers.lbp.realize import realize_lbp_plan
+from gateforge.providers.lbp.export import build_lbp_plan
 from gateforge.providers.lbp.toolkit import encode_lbp_toolkit_plan
 from gateforge.providers.lbp.types import (
     LBPRandomizerType,
@@ -109,8 +109,8 @@ class IntrinsicRegistryTests(unittest.TestCase):
         _, _, material = compile_material(str(FIXTURE))
         providers = {LBP_PROVIDER: make_lbp_provider()}
         graph = MaterialGraph.from_design(material, providers)
-        placed = TopologicalPlacer().place(graph).finalize(graph)
-        plan = realize_lbp_plan(material, graph, placed)
+        placed = TopologicalPlacer(providers=providers).place(graph).finalize(graph)
+        plan = build_lbp_plan(material, graph, placed, providers)
         timer = next(
             gadget for gadget in plan.gadgets if gadget.kind == LbpGadgetKind.TIMER
         )
@@ -162,8 +162,10 @@ class IntrinsicRegistryTests(unittest.TestCase):
         _, _, material = compile_material(str(TIMER_MODES_FIXTURE))
         providers = {LBP_PROVIDER: make_lbp_provider()}
         graph = MaterialGraph.from_design(material, providers)
-        placed = TopologicalPlacer().place(graph).finalize(graph)
-        encoded = encode_lbp_toolkit_plan(realize_lbp_plan(material, graph, placed))
+        placed = TopologicalPlacer(providers=providers).place(graph).finalize(graph)
+        encoded = encode_lbp_toolkit_plan(
+            build_lbp_plan(material, graph, placed, providers)
+        )
         things: dict[int, dict[str, object]] = {}
 
         def collect(value: object) -> None:
@@ -215,8 +217,8 @@ class IntrinsicRegistryTests(unittest.TestCase):
         _, _, material = compile_material(str(DYNAMIC_FIXTURE))
         providers = {LBP_PROVIDER: make_lbp_provider()}
         graph = MaterialGraph.from_design(material, providers)
-        placed = TopologicalPlacer().place(graph).finalize(graph)
-        plan = realize_lbp_plan(material, graph, placed)
+        placed = TopologicalPlacer(providers=providers).place(graph).finalize(graph)
+        plan = build_lbp_plan(material, graph, placed, providers)
 
         by_kind = {gadget.kind: gadget for gadget in plan.gadgets}
         self.assertEqual(by_kind[LbpGadgetKind.COUNTER].input_count, 2)

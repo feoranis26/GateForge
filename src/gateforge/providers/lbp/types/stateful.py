@@ -18,7 +18,7 @@ class _LBPStateSelectorType(LBPObjectType):
     TYPE_KEY: ClassVar[str]
 
     def get_placement_geometry(self) -> ObjectPlacementGeometry:
-        return ObjectPlacementGeometry(width=105.0, height=105.0)
+        return ObjectPlacementGeometry(width=52.5, height=52.5)
 
     @classmethod
     def decode_type_path(

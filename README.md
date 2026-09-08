@@ -79,18 +79,62 @@ uv run gateforge export lbp-toolkit \
 	--output build/object.json
 ```
 
+Inspect the neutral placement and the exact provider-realized layout before
+exporting:
+
+```sh
+uv run gateforge visualize \
+	build/material.json \
+	build/placement.json \
+	--watch
+```
+
+The view selector switches between material placement and registered provider
+views. Placed microchips are separate tabs; double-clicking a child microchip
+opens its tab. Click an element to inspect its properties and connected nets,
+drag with the middle or right mouse button to pan, and use the wheel to zoom.
+The toolbar can fit the active scene and toggle wires, labels, bounds, collision
+markers, and artifact watching. Hierarchy is already fixed in the loaded
+placement; rerun `gateforge place` to change it. On Debian or Ubuntu systems,
+install `python3-tk` if Python does not provide Tkinter.
+
+## Compiler Workbench
+
+Install the optional Qt 6 frontend and open a Verilog source:
+
+```sh
+uv sync --extra workbench
+uv run --extra workbench gateforge workbench scratch/test.v
+```
+
+The read-only workbench can advance one named mapping stage at a time or continue
+through the search, inspect retained, pruned, and deduplicated branches, compare
+proposals and claims, and render any retained Yosys checkpoint as an SVG. After
+materialization it can place the design and display the same provider-neutral
+placement and physical scenes used by the Tk artifact viewer. Its placement
+toolbar selects source/generated hierarchy, spacing, and routing gaps before the
+single placement pass. Scene controls toggle wires, labels, object bounds, and
+collision markers.
+
+Pyosys and the live compiler session run in a spawned worker process, not in the
+Qt process. Stop terminates that worker and discards its in-memory session;
+opening or reloading a source creates a fresh session. Material, state, search
+report, placement, visualization, and LBP Toolkit files are written only through
+an explicit Save or Export command. Graphviz `dot` is required only for the
+Yosys schematic tab; compilation and other views remain usable without it.
+
 Preserve HDL module occurrences as nested LBP microchips:
 
 ```sh
 uv run gateforge compile scratch/basic_nested.v \
 	--synthesis-hierarchy preserve \
+	--physical-hierarchy preserve-all \
 	--emit-material build/nested.material.json \
 	--emit-placement build/nested.placement.json
 
 uv run gateforge export lbp-toolkit \
 	build/nested.material.json \
 	build/nested.placement.json \
-	--physical-hierarchy preserve-all \
 	--output build/nested.object.json
 ```
 
@@ -101,15 +145,15 @@ Synthesis hierarchy controls optimization boundaries before mapping:
 - `min-cells --synthesis-threshold N` flattens module instances whose recursive
   primitive-cell count is below `N`.
 
-Physical hierarchy controls only packaging during LBP export:
+Physical hierarchy selects retained containers before placement:
 
-- `flat` emits one microchip.
-- `preserve-all` emits every preserved occurrence as a nested microchip.
+- `flat` places one root board.
+- `preserve-all` places every preserved occurrence as a nested microchip.
 - `min-objects --hierarchy-threshold N` retains occurrences with at least `N`
   recursive material objects.
 - `min-cost --hierarchy-threshold C` uses provider-estimated physical cost.
 
-Generated implementations use an independent export policy:
+Generated implementations use an independent placement policy:
 
 - `--generated-hierarchy inline` leaves implementation gadgets on their HDL
   owner board.
@@ -121,14 +165,15 @@ For example, compatible DFFs sharing clock/reset semantics are mapped as one
 register bank and exported as one generated microchip rather than exposing each
 storage gate on the parent board.
 
-Synthesis flattening is irreversible. A physical export policy can collapse
+Synthesis flattening is irreversible. A physical placement policy can collapse
 additional preserved boundaries, but cannot recreate boundaries removed before
 mapping.
 
-The exporter validates that the material and placement digests match, realizes
-LBP gates and wires, adds non-inverting NOT gates as temporary module I/O
-buffers, places labeled notes outside those buffers, and uses batteries for
-binary constants. Use `--title`,
+Before coordinates are assigned, the LBP provider elaborates gates, batteries,
+non-inverting module I/O buffers, labeled notes, boundary pins, and routed
+container connections. Placement then fixes every component transform, child
+transform, and board extent. The exporter validates the material digest and
+serializes that immutable physical inventory without moving or resizing it. Use `--title`,
 `--description`, and `--creator` to override inventory metadata.
 
 DO NOT KEEP THE GAME RUNNING WHEN WRITING TO BIGFART!!! This will lead to desync
@@ -142,20 +187,23 @@ remain in provider validation. This allows LBP to enforce one producer per wire
 without imposing that restriction on targets whose networks combine multiple
 sources.
 
-The topological placer condenses strongly connected components, places the
-resulting DAG in deterministic longest-path layers, and places members of each
-feedback component together without deleting loop edges. It places inputs and
-constants on the left and outputs on the right. Coordinates represent center
-points only; provider-supplied object geometry reserves enough vertical rows for
-wide gates.
-The default 210-by-105 grid leaves one globally aligned routing row after every
-five content rows. Override that policy with `--routing-group-size` and
-`--routing-gap-rows`. Collision optimization, explicit wire routing, and
+The topological placer condenses strongly connected components and places the
+resulting DAG in deterministic longest-path layers. Within each nontrivial
+component, deterministic cycle removal selects feedback edges and layers the
+remaining DAG; feedback wires may therefore run right-to-left instead of
+collapsing the whole component into one column. It places inputs and constants
+on the left and outputs on the right. Coordinates represent center points only;
+provider-supplied object geometry reserves each object's physical height,
+including variable-height gates.
+The default layout packs subjects on a 52.5-unit minimum pitch and leaves one
+52.5-unit routing gap after each 250-unit content group. Override that policy
+with `--routing-group-height`, `--row-pitch`, and `--routing-gap-rows`.
+Collision optimization, explicit wire routing, and
 crossing reduction remain deliberately deferred.
 
 `MaterialDesign` and `PlacedDesign` are separate durable artifacts. Deployment
 backends must load both and verify the placement's material digest before
-realizing a target-specific design.
+serializing a target-specific design.
 
 The compiler will fail if it exhausts all lowering passes but unclaimed RTLIL objects remain
 
@@ -177,14 +225,15 @@ generated according to Yosys semantics. The compact style has been reported to
 work in game; hardened and synthesized reset/enable behavior still require the
 full in-game acceptance matrix.
 
-Generated register microchips receive a deterministic dense layout independent
-of the flat compilation placement. Compatible bits are tiled together, shared
-clock/reset/enable controls occupy a dedicated row, and the parent board is
-reflown with each retained child treated as one compound component.
+Generated register microchips use the same recursive topological placement as
+source-module containers. Each child board is placed bottom-up, then its fixed
+façade is treated as one compound subject in its parent. Export does not compact
+registers, reflow parents, or alter either transform.
 
 Material feedback is preserved. The topological placer condenses strongly
-connected components for ordering and lays each component out deterministically
-without deleting loop edges.
+connected components for ordering, selects deterministic feedback edges within
+each component, and layers the remaining forward edges without deleting or
+rewriting any loop edge.
 
 ## GateForge Intrinsics
 

@@ -56,7 +56,7 @@ class LBPTimerType(LBPObjectType):
         )
 
     def get_placement_geometry(self) -> ObjectPlacementGeometry:
-        return ObjectPlacementGeometry(width=210.0, height=105.0)
+        return ObjectPlacementGeometry(width=105.0, height=52.5)
 
     @classmethod
     def decode_type_path(
@@ -93,7 +93,7 @@ class LBPCounterType(LBPObjectType):
         )
 
     def get_placement_geometry(self) -> ObjectPlacementGeometry:
-        return ObjectPlacementGeometry(width=210.0, height=105.0)
+        return ObjectPlacementGeometry(width=105.0, height=52.5)
 
     @classmethod
     def decode_type_path(
@@ -131,7 +131,7 @@ class LBPRandomizerType(LBPObjectType):
         return ObjectTypeSchema(self.get_type(), frozenset(ports))
 
     def get_placement_geometry(self) -> ObjectPlacementGeometry:
-        return ObjectPlacementGeometry(width=105.0, height=105.0)
+        return ObjectPlacementGeometry(width=52.5, height=52.5)
 
     @classmethod
     def decode_type_path(
@@ -169,8 +169,8 @@ class LBPSelectorType(LBPObjectType):
 
     def get_placement_geometry(self) -> ObjectPlacementGeometry:
         return ObjectPlacementGeometry(
-            width=105.0,
-            height=52.5 * max(self.width, 2),
+            width=52.5,
+            height=26.25 * max(self.width, 2),
         )
 
     @classmethod

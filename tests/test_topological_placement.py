@@ -1,6 +1,6 @@
 import unittest
 
-from gateforge.graph import MaterialGraph
+from gateforge.graph import MaterialGraph, ModulePortSubject, ObjectSubject
 from gateforge.material import (
     MaterialDesign,
     MaterialModulePortRef,
@@ -30,8 +30,26 @@ def _coordinates(graph: MaterialGraph, options=None):
     placer = TopologicalPlacer(options or TopologicalPlacementOptions())
     placed = placer.place(graph).finalize(graph)
     return {
-        item.object: (item.x, item.y) for item in placed.placements.objects
+        item.source.object: (item.x, item.y)
+        for item in placed.prefabs
+        if isinstance(item.source, ObjectSubject)
     }, placed
+
+
+def _object_placements(placed):
+    return {
+        item.source.object: item
+        for item in placed.prefabs
+        if isinstance(item.source, ObjectSubject)
+    }
+
+
+def _module_port_placements(placed):
+    return tuple(
+        item
+        for item in placed.prefabs
+        if isinstance(item.source, ModulePortSubject)
+    )
 
 
 def _lbp_chain(length: int) -> MaterialDesign:
@@ -85,7 +103,7 @@ class TopologicalPlacementTests(unittest.TestCase):
         ]
         self.assertEqual(ordered_x, sorted(ordered_x))
         self.assertEqual(len(set(ordered_x)), 3)
-        terminal_x = [item.x for item in placed.placements.module_ports]
+        terminal_x = [item.x for item in _module_port_placements(placed)]
         self.assertLess(min(terminal_x), ordered_x[0])
         self.assertGreater(max(terminal_x), ordered_x[-1])
         self.assertEqual((placed.bounds.min_x + placed.bounds.max_x) / 2, 0.0)
@@ -179,11 +197,11 @@ class TopologicalPlacementTests(unittest.TestCase):
         _, placed = _coordinates(graph)
 
         self.assertEqual(
-            [item.x for item in placed.placements.module_ports],
+            [item.x for item in _module_port_placements(placed)],
             [-105.0, 105.0],
         )
 
-    def test_routing_gap_rows_align_across_columns(self) -> None:
+    def test_routing_gaps_follow_physical_content_height(self) -> None:
         sources = tuple(
             _material_object(
                 f"source_{index}",
@@ -216,16 +234,14 @@ class TopologicalPlacementTests(unittest.TestCase):
         placed = TopologicalPlacer(
             providers={LBP_PROVIDER: make_lbp_provider()}
         ).place(graph).finalize(graph)
-        by_object = {
-            item.object: item for item in placed.placements.objects
-        }
+        by_object = _object_placements(placed)
         source_y = sorted(by_object[item.identifier].y for item in sources)
         sink_y = sorted(by_object[item.identifier].y for item in sinks)
 
         self.assertEqual(source_y, sink_y)
         self.assertEqual(
             [right - left for left, right in zip(source_y, source_y[1:])],
-            [105.0, 105.0, 105.0, 105.0, 210.0],
+            [52.5, 52.5, 52.5, 145.0, 52.5],
         )
 
     def test_provider_geometry_reserves_multiple_rows_for_wide_gates(self) -> None:
@@ -247,13 +263,11 @@ class TopologicalPlacementTests(unittest.TestCase):
         placed = TopologicalPlacer(
             providers={LBP_PROVIDER: make_lbp_provider()}
         ).place(graph).finalize(graph)
-        by_object = {
-            item.object: item for item in placed.placements.objects
-        }
+        by_object = _object_placements(placed)
 
-        self.assertGreaterEqual(
+        self.assertEqual(
             abs(by_object[wide.identifier].y - by_object[narrow.identifier].y),
-            210.0,
+            91.875,
         )
 
     def test_isolated_object_uses_exact_midpoint_of_object_span(self) -> None:
@@ -278,7 +292,7 @@ class TopologicalPlacementTests(unittest.TestCase):
             (first_x + last_x) / 2,
         )
 
-    def test_cycle_is_placed_as_one_deterministic_component(self) -> None:
+    def test_cycle_is_layered_with_one_feedback_edge(self) -> None:
         left = _material_object("left", ADDITIVE_NODE, "a")
         right = _material_object("right", ADDITIVE_NODE, "c")
         design = MaterialDesign(
@@ -304,11 +318,11 @@ class TopologicalPlacementTests(unittest.TestCase):
         first = TopologicalPlacer().place(graph).finalize(graph)
         second = TopologicalPlacer().place(graph).finalize(graph)
         by_object = {
-            item.object: (item.x, item.y) for item in first.placements.objects
+            identifier: (item.x, item.y)
+            for identifier, item in _object_placements(first).items()
         }
 
-        self.assertEqual(by_object[left.identifier][0], by_object[right.identifier][0])
-        self.assertNotEqual(by_object[left.identifier][1], by_object[right.identifier][1])
+        self.assertNotEqual(by_object[left.identifier][0], by_object[right.identifier][0])
         self.assertEqual(first.canonical_data(), second.canonical_data())
         self.assertEqual(len(graph.dependencies), 2)
 
@@ -358,18 +372,13 @@ class TopologicalPlacementTests(unittest.TestCase):
 
         coordinates, _ = _coordinates(graph)
 
-        self.assertLess(
-            coordinates[source.identifier][0],
-            coordinates[left.identifier][0],
-        )
-        self.assertEqual(
+        feedback_x = (
             coordinates[left.identifier][0],
             coordinates[right.identifier][0],
         )
-        self.assertLess(
-            coordinates[right.identifier][0],
-            coordinates[sink.identifier][0],
-        )
+        self.assertLess(coordinates[source.identifier][0], min(feedback_x))
+        self.assertNotEqual(*feedback_x)
+        self.assertLess(max(feedback_x), coordinates[sink.identifier][0])
 
     def test_empty_graph_is_rejected(self) -> None:
         graph = MaterialGraph.from_design(MaterialDesign((), ()), {})
@@ -392,6 +401,8 @@ class TopologicalPlacementTests(unittest.TestCase):
         self.assertEqual(placed.bounds.max_x, 100.0)
         with self.assertRaises(PlacementError):
             TopologicalPlacementOptions(column_pitch=0)
+        with self.assertRaises(PlacementError):
+            TopologicalPlacementOptions(routing_group_height=0)
 
     def test_repeated_placement_is_deterministic(self) -> None:
         graph = MaterialGraph.from_design(

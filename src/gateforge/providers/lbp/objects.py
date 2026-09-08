@@ -135,6 +135,9 @@ def _is_lbp_source(
 
 
 def make_lbp_provider() -> TargetProvider:
+    from gateforge.providers.lbp.physical import elaborate_lbp_physical_design
+    from gateforge.providers.lbp.visualization import LBPVisualizationAdapter
+
     return TargetProvider(
         identifier=LBP_PROVIDER,
         registry=LBPTypeRegistry(),
@@ -145,4 +148,6 @@ def make_lbp_provider() -> TargetProvider:
         object_geometry_resolver=lambda material_object, registry: (
             decode_lbp_object_type(material_object.type).get_placement_geometry()
         ),
+        physical_elaborator=elaborate_lbp_physical_design,
+        visualization=LBPVisualizationAdapter(),
     )

@@ -51,6 +51,13 @@ from gateforge.target import (
 
 
 class LBPObjectTypeTests(unittest.TestCase):
+    def test_gate_geometry_matches_exported_scale(self) -> None:
+        narrow = LBPAndGateType(width=2, invert=False).get_placement_geometry()
+        wide = LBPAndGateType(width=5, invert=False).get_placement_geometry()
+
+        self.assertEqual((narrow.width, narrow.height), (52.5, 52.5))
+        self.assertEqual((wide.width, wide.height), (52.5, 131.25))
+
     def test_lbp_provider_rejects_nonempty_object_configuration(self) -> None:
         prefab = self._single_configured_prefab()
 

@@ -25,7 +25,7 @@ Completed in the first implementation pass:
   from HDL modules; schema v1 artifacts remain readable.
 - Mapping proposals and durable claims carry implementation names and
   `INLINE`/`AUTO`/`CONTAINER` packaging hints.
-- LBP containerization supports orthogonal generated hierarchy modes:
+- Recursive placement supports orthogonal generated hierarchy modes:
   `inline`, `auto`, and `all`.
 - Mapping-provider execution is stage-aware.
 - Coarse `$dff`, `$adff`, and `$sdff` cells form maximal shared-control banks at
@@ -45,12 +45,10 @@ Completed in the first implementation pass:
   remains selectable with `--register-style hardened`.
 - DFFE/ADFFE/SDFFE/SDFFCE families have structural coarse/scalar support,
   independent enable subgroups, hold feedback, and reset/enable priority.
-- Generated register children use deterministic bit-slice tiling, and parent
-  containers are reflown with retained child microchips treated as compound
-  nodes.
+- Generated register children and their parents use one recursive topological
+  placement pass; fixed child façades are compound nodes in their parents.
 - `scratch/test.v` now realizes as 68 material objects rather than 140. The
-  generated width-nine child is bounded by `997.5 × 787.5`, while the reflown
-  root board is `945 × 630`.
+  width-nine bank is retained as one generated child.
 
 Still pending:
 
@@ -149,15 +147,19 @@ as one microchip on its parent board, regardless of bit width.
 1. Replace cycle rejection in `src/gateforge/placement/topological.py` with a
    deterministic strongly connected component decomposition.
 2. Collapse SCCs into a condensation DAG.
-3. Apply the existing output-biased longest-path column assignment to SCC
-   super-nodes.
+3. Apply output-biased weighted longest-path column assignment to SCC
+  super-nodes.
 4. Preserve existing coordinates for singleton acyclic SCCs.
-5. Arrange members of nontrivial SCCs in a deterministic bounded local grid:
-   - Sort by `material_subject_key`.
-   - Respect provider object geometry.
-   - Treat self-loops as one-member cyclic SCCs.
+5. Layer members of nontrivial SCCs with deterministic cycle removal:
+  - Repeatedly remove sinks and sources, then break remaining cycles by the
+    greatest output-minus-input degree with `local_subject_key` tie-breaking.
+  - Treat edges that oppose the resulting order as routed feedback edges.
+  - Assign longest-path layers to the remaining forward DAG and include its
+    width in condensation-DAG spacing.
+  - Respect provider object geometry and treat self-loops as one-member cyclic
+    SCCs.
 6. Validate left-to-right ordering only across SCC boundaries. Internal SCC
-   edges may point in any direction.
+  feedback edges may point right-to-left.
 7. Preserve every original `MaterialDependency` for routing and export.
 
 ### Tests
@@ -179,10 +181,8 @@ coordinates, and does not remove or rewrite connectivity.
 
 ## Phase 2: Durable Implementation Occurrences
 
-**Status: durable schema, materialization, policy, and LBP containerization are
-implemented. Generated register children receive dense local bit-slice layouts,
-and parent containers are reflown with retained children treated as compound
-nodes.**
+**Status: durable schema, materialization, hierarchy policy, provider physical
+elaboration, recursive placement, and pure serialization are implemented.**
 
 ### Data Model
 
@@ -240,17 +240,18 @@ For every accepted claim occurrence:
 4. Record source-module ownership separately from the generated group path.
 5. Validate common occurrence, prefab, provider, and owner across all members.
 
-### Placement and Containerization
+### Placement and Physical Hierarchy
 
-1. Place selected implementation occurrences internally first.
-2. Expose each implementation's bounds as one compound subject to its parent
-   layout.
-3. Flatten local transforms into `PlacedDesign` while retaining group metadata.
-4. Build one LBP container tree from retained HDL modules plus selected
-   implementation groups.
-5. Parent a generated group below its nearest retained source-module owner.
-6. Derive child microchip pins from stored implementation ports, not by
-   re-discovering cuts during export.
+1. Select retained HDL and generated implementation containers before placement.
+2. Elaborate provider components, annotations, prefabs, boundaries, and routes
+  before assigning coordinates.
+3. Place child boards bottom-up and expose each fixed façade as one compound
+  subject to its parent layout.
+4. Store local component transforms, child transforms, board extents, and the
+  complete routed container tree in `PlacedDesign`.
+5. Derive child microchip pins from stored implementation ports.
+6. Serialize the placed artifact without reconstructing hierarchy or changing
+  geometry.
 
 ### Tests
 
@@ -369,10 +370,10 @@ Per bit:
 - Two AND gates combining pulse with D and !D.
 - One state Selector selected by those two pulse paths.
 
-Generated register children are tiled by bit and shared controls are placed on a
-dedicated row. Parent containers are independently reflown around the child
-microchip. The width-nine integration child is bounded by `997.5 × 787.5`; its
-root board is bounded by `945 × 630`.
+Generated register children are placed by the same SCC-aware topological policy
+as every other container. Their fixed façades participate in parent placement
+as compound subjects; no register-specific compaction or parent reflow runs
+afterward.
 
 The edge detector is a target-1 Counter whose output is fed back to its own
 reset input and fanned out as the bank-wide one-frame pulse. Generic mapping

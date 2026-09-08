@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 import math
-from typing import Callable, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
 from gateforge.material import (
     MaterialAttachment,
@@ -19,6 +19,12 @@ from gateforge.target import (
     SemanticPrefab,
     TargetTypeRegistry,
 )
+from gateforge.visualization.provider import VisualizationAdapter
+
+if TYPE_CHECKING:
+    from gateforge.graph import MaterialGraph
+    from gateforge.hierarchy import GeneratedHierarchyPolicy, PhysicalHierarchyPolicy
+    from gateforge.placement.physical import PhysicalDesign
 
 
 class ObjectConfigurationCodec(Protocol):
@@ -33,6 +39,16 @@ class ObjectConfigurationCodec(Protocol):
         object_type: ObjectTypeIdentifier,
         configuration: ProviderConfiguration,
     ) -> object: ...
+
+
+class PhysicalDesignElaborator(Protocol):
+    def __call__(
+        self,
+        graph: MaterialGraph,
+        providers: Mapping[str, TargetProvider],
+        physical_hierarchy: PhysicalHierarchyPolicy,
+        generated_hierarchy: GeneratedHierarchyPolicy,
+    ) -> PhysicalDesign: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +79,8 @@ class TargetProvider:
         [MaterialObject, TargetTypeRegistry],
         float,
     ] | None = None
+    physical_elaborator: PhysicalDesignElaborator | None = None
+    visualization: VisualizationAdapter | None = None
 
     def validate(self, prefab: SemanticPrefab) -> None:
         if prefab.provider != self.identifier:
@@ -176,3 +194,21 @@ class TargetProvider:
         if not math.isfinite(value) or value < 0:
             raise ValueError("Material object cost must be finite and nonnegative")
         return value
+
+    def elaborate_physical_design(
+        self,
+        graph: MaterialGraph,
+        providers: Mapping[str, TargetProvider],
+        physical_hierarchy: PhysicalHierarchyPolicy,
+        generated_hierarchy: GeneratedHierarchyPolicy,
+    ) -> PhysicalDesign:
+        if self.physical_elaborator is None:
+            raise ValueError(
+                f"Provider {self.identifier!r} does not support physical elaboration"
+            )
+        return self.physical_elaborator(
+            graph,
+            providers,
+            physical_hierarchy,
+            generated_hierarchy,
+        )
