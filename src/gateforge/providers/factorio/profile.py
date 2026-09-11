@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 FACTORIO_PROFILE_VERSION = "2.x"
@@ -67,6 +67,7 @@ _PROFILES = {
     item.name: item
     for item in (
         ARITHMETIC_COMBINATOR,
+        replace(ARITHMETIC_COMBINATOR, name="decider-combinator"),
         CONSTANT_COMBINATOR,
         SMALL_LAMP,
         MEDIUM_ELECTRIC_POLE,

@@ -1,6 +1,8 @@
 from pathlib import Path
+from dataclasses import replace
 import unittest
 
+from gateforge.compiler import compilation_backend, realize_search_result
 from gateforge.design import DesignContext
 from gateforge.gateforge import design_preprocess
 from gateforge.mapping import (
@@ -11,6 +13,12 @@ from gateforge.mapping import (
     MappingProvider,
 )
 from gateforge.pipeline import MappingStage
+from gateforge.placement import ScoreBreakdown, ScoreComponent
+from gateforge.realization import (
+    DirectMaterialRealizationStrategy,
+    RealizationInfeasibleError,
+    RealizationOutcome,
+)
 from gateforge.providers.lbp.common import LBP_LOGIC, LBP_PROVIDER, LBP_WIRE
 from gateforge.providers.lbp.mappers import LBPCombinatorialLowLevelGateMapper
 from gateforge.providers.lbp.objects import make_lbp_provider
@@ -184,12 +192,72 @@ class MisleadingExpensiveSourceNotMapper(SourceNotMapper):
         )
 
 
+class InvertedCostRealizationStrategy(DirectMaterialRealizationStrategy):
+    def realize(self, material, providers, options):
+        return tuple(
+            RealizationOutcome(
+                outcome.artifact,
+                ScoreBreakdown((ScoreComponent("test_build_cost", 4 - len(material.objects)),)),
+            )
+            for outcome in super().realize(material, providers, options)
+        )
+
+
+class RejectSmallRealizationStrategy(DirectMaterialRealizationStrategy):
+    def realize(self, material, providers, options):
+        if len(material.objects) == 1:
+            raise RealizationInfeasibleError("Small implementation cannot be routed")
+        return super().realize(material, providers, options)
+
+
 def _search_context() -> tuple[DesignContext, CompilationIntermediateState]:
     context = design_preprocess(str(FIXTURE))
     return context, CompilationIntermediateState.empty(context.revision)
 
 
 class CompilationSearchTests(unittest.TestCase):
+    def test_realization_can_select_a_more_expensive_material_candidate(self) -> None:
+        context, state = _search_context()
+        backend = replace(
+            compilation_backend(), realization_strategy=InvertedCostRealizationStrategy()
+        )
+        result = CompilationSearch(
+            Mapper([
+                MisleadingExpensiveSourceNotMapper(),
+                LBPCombinatorialLowLevelGateMapper(),
+            ]),
+            backend.target_providers,
+            MappingSearchOptions(mode=MappingSearchMode.EXHAUSTIVE),
+        ).run(
+            context,
+            state,
+            (MappingStage("source"), MappingStage("leaf", ("techmap",))),
+        )
+
+        realized = realize_search_result(result, backend)
+
+        self.assertEqual(len(realized.candidates), 2)
+        self.assertEqual(len(realized.winner.baseline.material.objects), 3)
+        self.assertEqual(realized.winner.outcome.score.total, 1)
+        self.assertIsNone(realized.materialized.report.winner)
+        self.assertEqual(realized.rejections, ())
+        direct = realize_search_result(result, compilation_backend())
+        self.assertEqual(len(direct.winner.baseline.material.objects), 1)
+        surviving = realize_search_result(
+            result,
+            replace(backend, realization_strategy=RejectSmallRealizationStrategy()),
+        )
+        self.assertEqual(len(surviving.candidates), 1)
+        self.assertEqual(len(surviving.winner.baseline.material.objects), 3)
+        self.assertEqual(len(surviving.rejections), 1)
+        self.assertEqual(
+            surviving.rejections[0].reason, "Small implementation cannot be routed"
+        )
+        self.assertNotEqual(
+            surviving.rejections[0].candidate,
+            surviving.winner.baseline.score.candidate.value,
+        )
+
     def test_stage_session_matches_all_at_once_search_in_every_mode(self) -> None:
         stages = (
             MappingStage("source"),
@@ -355,6 +423,43 @@ class CompilationSearchTests(unittest.TestCase):
             ),
         )
         self.assertEqual(report.canonical_data()["schema_version"], 1)
+
+    def test_materialization_preserves_candidates_without_selecting_winner(self) -> None:
+        from gateforge.compiler import materialize_search_candidates
+
+        context, state = _search_context()
+        providers = {LBP_PROVIDER: make_lbp_provider()}
+        result = CompilationSearch(
+            Mapper([
+                MisleadingExpensiveSourceNotMapper(),
+                LBPCombinatorialLowLevelGateMapper(),
+            ]),
+            providers,
+            MappingSearchOptions(mode=MappingSearchMode.EXHAUSTIVE),
+        ).run(
+            context,
+            state,
+            (MappingStage("source"), MappingStage("leaf", ("techmap",))),
+        )
+
+        materialized = materialize_search_candidates(result, providers)
+
+        self.assertEqual(
+            {len(item.material.objects) for item in materialized.candidates},
+            {1, 3},
+        )
+        self.assertEqual(
+            {item.score.candidate for item in materialized.candidates},
+            {item.identifier for item in result.candidates},
+        )
+        self.assertIsNone(materialized.report.winner)
+        self.assertEqual(len(materialized.report.terminal_scores), 2)
+        for candidate in materialized.candidates:
+            self.assertEqual(
+                candidate.material.get_digest().value,
+                candidate.score.material_digest,
+            )
+            self.assertEqual(candidate.context.revision, candidate.state.revision)
 
 
 if __name__ == "__main__":

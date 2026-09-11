@@ -475,16 +475,26 @@ def _route_link(
     entities: Mapping[str, FactorioEntity],
     route_index: int,
 ) -> tuple[tuple[FactorioEntity, ...], tuple[FactorioWireSegment, ...]]:
+    relays, links = route_connector_link(source, target, entities, f"{net.value}:{route_index}")
+    return relays, tuple(FactorioWireSegment(net, color, left, right) for left, right in links)
+
+
+def route_connector_link(
+    source: FactorioConnectorEndpoint,
+    target: FactorioConnectorEndpoint,
+    entities: Mapping[str, FactorioEntity],
+    route_id: str,
+) -> tuple[tuple[FactorioEntity, ...], tuple[tuple[FactorioConnectorEndpoint, FactorioConnectorEndpoint], ...]]:
     source_entity = entities[source.entity]
     target_entity = entities[target.entity]
     if _within_reach(source_entity, source.connector, target_entity, target.connector):
-        return (), (FactorioWireSegment(net, color, source, target),)
+        return (), ((source, target),)
 
     source_position = connector_position(source_entity, source.connector)
     target_position = connector_position(target_entity, target.connector)
     distance = math.dist(source_position, target_position)
     if distance <= 0:
-        raise FactorioRoutingError(f"Cannot route coincident endpoints on {net.value}")
+        raise FactorioRoutingError(f"Cannot route coincident endpoints on {route_id}")
     unit_x = (target_position[0] - source_position[0]) / distance
     unit_y = (target_position[1] - source_position[1]) / distance
 
@@ -550,7 +560,7 @@ def _route_link(
             relays.append(
                 FactorioEntity(
                     identifier=(
-                        f"factorio:relay:{net.value}:{route_index}:{relay_index}"
+                        f"factorio:relay:{route_id}:{relay_index}"
                     ),
                     prototype=prototype,
                     x=x,
@@ -581,17 +591,14 @@ def _route_link(
             )
             for left, right in zip(endpoints, endpoints[1:])
         ):
-            return relay_tuple, tuple(
-                FactorioWireSegment(net, color, left, right)
-                for left, right in zip(endpoints, endpoints[1:])
-            )
+            return relay_tuple, tuple(zip(endpoints, endpoints[1:]))
 
     limiting_reach = min(
         factorio_entity_profile(source_entity.prototype).circuit_wire_reach,
         factorio_entity_profile(target_entity.prototype).circuit_wire_reach,
     )
     raise FactorioRoutingError(
-        f"Cannot route net {net.value} between {source.entity!r} and "
+        f"Cannot route {route_id} between {source.entity!r} and "
         f"{target.entity!r}; distance={distance:.3f}, endpoint reach="
         f"{limiting_reach:.3f}"
     )

@@ -373,9 +373,11 @@ def _dispatch_session_command(
                 "physical_hierarchy",
                 "hierarchy_threshold",
                 "generated_hierarchy",
+                *({"provider_options"} if "provider_options" in request.payload else set()),
             },
         )
         session.place(
+            provider_options=_payload_object(request, "provider_options") if "provider_options" in request.payload else None,
             options=TopologicalPlacementOptions(
                 column_pitch=_payload_number(request, "column_pitch"),
                 row_pitch=_payload_number(request, "row_pitch"),
@@ -402,6 +404,14 @@ def _dispatch_session_command(
         _require_payload(request, {"identifier"})
         identifier = _payload_string(request, "identifier")
         return {"candidate": session.candidate_details(identifier).canonical_data()}
+    if request.command == WorkerCommand.REALIZE:
+        _require_payload(request, {"provider_options"})
+        session.realize(provider_options=_payload_object(request, "provider_options"))
+        return {"snapshot": session.snapshot().canonical_data()}
+    if request.command == WorkerCommand.SELECT_REALIZATION:
+        _require_payload(request, {"identifier"})
+        session.select_realization(_payload_string(request, "identifier"))
+        return {"snapshot": session.snapshot().canonical_data()}
     if request.command == WorkerCommand.RENDER_SCHEMATIC:
         from gateforge.workbench.yosys_graph import SchematicRenderOptions
 
@@ -445,6 +455,7 @@ def _dispatch_session_command(
             "report": session.save_report,
             "placement": session.save_placement,
             "visualization": session.save_visual_document,
+            "realization": session.save_realization,
         }.get(kind)
         if save is None:
             raise _WorkerDispatchError(
@@ -486,9 +497,6 @@ def _dispatch_session_command(
         saved_path = session.export(output_path, build)
         return {"format": "lbp-toolkit", "path": str(saved_path)}
     if request.command == WorkerCommand.EXPORT_FACTORIO_BLUEPRINT:
-        from gateforge.providers.factorio.blueprint import build_factorio_blueprint
-        from gateforge.providers.factorio.routing import build_factorio_routed_design
-
         _require_payload(
             request,
             {
@@ -497,6 +505,7 @@ def _dispatch_session_command(
                 "add_input_combinators",
                 "input_values",
                 "add_output_lamps",
+                *({"power_layout"} if "power_layout" in request.payload else set()),
             },
         )
         output_path = _payload_string(request, "path")
@@ -517,24 +526,13 @@ def _dispatch_session_command(
                 "Factorio blueprint export requires a Factorio session",
             )
 
-        def build(material, graph, placed, providers):
-            del providers
-            routed = build_factorio_routed_design(
-                material,
-                graph,
-                placed,
-                input_drivers=(
-                    "constant" if add_input_combinators else "none"
-                ),
-                input_values=input_values,
-                output_lamps=add_output_lamps,
-            )
-            return build_factorio_blueprint(
-                routed,
-                label=label,
-            ).canonical_data()
-
-        saved_path = session.export(output_path, build)
+        saved_path = session.export_realization(
+            output_path, label=label, provider_options={"factorio": {
+                "input_drivers": "constant" if add_input_combinators else "none",
+                "input_values": input_values, "output_lamps": add_output_lamps,
+                "power_layout": request.payload.get("power_layout", "grid"),
+            }},
+        )
         return {"format": "factorio-blueprint", "path": str(saved_path)}
     if request.command == WorkerCommand.SHUTDOWN:
         _require_payload(request, set())

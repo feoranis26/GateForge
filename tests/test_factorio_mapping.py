@@ -43,7 +43,7 @@ class FactorioMappingTests(unittest.TestCase):
         )
         make_factorio_provider().validate(proposal.prefab)
 
-    def test_mapper_rejects_signed_operand(self) -> None:
+    def test_mapper_accepts_signed_full_width_operand(self) -> None:
         context = design_preprocess(str(FIXTURE))
         snapshot = context.snapshot()
         module = next(
@@ -72,7 +72,9 @@ class FactorioMappingTests(unittest.TestCase):
             modules={**snapshot.modules, module.name: signed_module},
         )
 
-        self.assertEqual(FactorioAddMapper().map(signed_snapshot), ())
+        proposals = FactorioAddMapper().map(signed_snapshot)
+        self.assertEqual(len(proposals), 1)
+        make_factorio_provider().validate(proposals[0].prefab)
 
     def test_add32_materializes_and_places_one_native_combinator(self) -> None:
         provider = make_factorio_provider()

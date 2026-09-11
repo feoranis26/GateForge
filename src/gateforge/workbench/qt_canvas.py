@@ -337,9 +337,16 @@ class VisualSceneView(ZoomableGraphicsView):
         self._element_items[element.identifier] = group
         for primitive in element.descriptor.primitives:
             item = _primitive_item(primitive)
-            group.addToGroup(item)
             if isinstance(item, QGraphicsSimpleTextItem):
+                bounds = element.descriptor.bounds
+                text_bounds = item.boundingRect()
+                scale = min(1.0, bounds.width * 0.85 / max(1.0, text_bounds.width()), bounds.height * 0.85 / max(1.0, text_bounds.height()))
+                item.setScale(scale)
+                if isinstance(primitive, VisualText):
+                    origin = _text_origin(primitive.position, QRectF(0, 0, text_bounds.width() * scale, text_bounds.height() * scale), primitive.anchor)
+                    item.setPos(*origin)
                 self._label_items.append(item)
+            group.addToGroup(item)
         for port in element.descriptor.ports:
             marker = QGraphicsEllipseItem(-2.75, -2.75, 5.5, 5.5)
             marker.setPos(port.position.x, port.position.y)
@@ -533,6 +540,8 @@ def _text_origin(
     horizontal = 0.0
     vertical = 0.0
     normalized = anchor.lower()
+    if normalized == "center":
+        return position.x - bounds.width() / 2, position.y - bounds.height() / 2
     if "e" in normalized:
         horizontal = bounds.width()
     elif "w" not in normalized:

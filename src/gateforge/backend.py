@@ -1,9 +1,11 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from gateforge.behavior_source import BehaviorLowerer
 from gateforge.mapping import MappingProvider
 from gateforge.placement import TopologicalPlacementOptions
 from gateforge.provider import TargetProvider
+from gateforge.realization import RealizationPresenter, RealizationStrategy, SourceRealizationStrategy
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +15,9 @@ class CompilationBackend:
     mapping_providers: tuple[MappingProvider, ...]
     placement_options: TopologicalPlacementOptions
     supported_placers: tuple[str, ...] = ("topological",)
+    realization_strategy: RealizationStrategy | SourceRealizationStrategy | None = None
+    behavior_lowerer: BehaviorLowerer | None = None
+    realization_presenter: RealizationPresenter | None = None
 
     def __post_init__(self) -> None:
         if not self.identifier:

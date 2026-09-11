@@ -8,6 +8,7 @@ import json
 import math
 from typing import Protocol
 
+from gateforge.behavior_source import BehaviorCapture
 from gateforge.claims import accept_mapping_proposals
 from gateforge.design import DesignCheckpoint, DesignContext
 from gateforge.mapping import (
@@ -181,6 +182,7 @@ class MappingSearchReport:
 class MappingSearchResult:
     candidates: tuple[CompilationCandidate, ...]
     report: MappingSearchReport
+    behavior: BehaviorCapture | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,8 +298,10 @@ class CompilationSearch:
         context: DesignContext,
         state: CompilationIntermediateState,
         stages: Sequence[MappingSearchStage],
+        *,
+        behavior: BehaviorCapture | None = None,
     ) -> "CompilationSearchSession":
-        return CompilationSearchSession(self, context, state, stages)
+        return CompilationSearchSession(self, context, state, stages, behavior=behavior)
 
     def _expand_candidate(
         self,
@@ -412,12 +416,17 @@ class CompilationSearchSession:
         context: DesignContext,
         state: CompilationIntermediateState,
         stages: Sequence[MappingSearchStage],
+        *,
+        behavior: BehaviorCapture | None = None,
     ) -> None:
         if context.revision != state.revision:
             raise ValueError(
                 f"State revision {state.revision} does not match design revision "
                 f"{context.revision}"
             )
+        if behavior is not None and behavior.revision != context.revision:
+            raise MappingSearchError("Behavior capture belongs to a different source revision")
+        self.behavior = behavior
         self.search = search
         self.stages = tuple(stages)
         self.stage_index = 0
@@ -519,6 +528,7 @@ class CompilationSearchSession:
         return MappingSearchResult(
             self.frontier,
             MappingSearchReport(tuple(self._reports)),
+            self.behavior,
         )
 
     def finish(self) -> MappingSearchResult:

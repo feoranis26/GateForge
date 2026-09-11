@@ -42,6 +42,16 @@ class MaterializationError(ValueError):
     pass
 
 
+def _packed_constant(targets, sources, network_type, providers) -> MaterialConstantRef | None:
+    schema = providers[network_type.provider].registry.network(network_type)
+    if schema.interface_mode != NetworkInterfaceMode.PACKED or not all(isinstance(source, ConstantBit) for source in sources):
+        return None
+    if len({target.port for target in targets}) != 1 or sorted(target.bit for target in targets) != list(range(len(targets))):
+        raise MaterializationError("Packed constant requires one complete ordered port")
+    ordered = sorted(zip(targets, sources, strict=True), key=lambda item: item[0].bit, reverse=True)
+    return MaterialConstantRef("".join(source.value.value for _target, source in ordered))
+
+
 def _module_boundary_attachments(
     network_type: NetworkTypeIdentifier,
     ports: set[MaterialModulePortRef],
@@ -287,6 +297,13 @@ def materialize(
                         f"has width {len(cell_port.bits)}, expected "
                         f"{len(port_binding.targets)}"
                     )
+                keys = {external_to_local[(occurrence, target)] for target in port_binding.targets}
+                if len(keys) == 1:
+                    local_key = next(iter(keys))
+                    constant = _packed_constant(port_binding.targets, cell_port.bits, local_types[local_key], providers)
+                    if constant is not None:
+                        local_constants[local_key].add(constant)
+                        continue
                 for target, source in zip(
                     port_binding.targets,
                     cell_port.bits,
@@ -521,6 +538,13 @@ def materialize_hierarchy(
                             f"has width {len(cell_port.bits)}, expected "
                             f"{len(binding.targets)}"
                         )
+                    keys = {external_to_local[target] for target in binding.targets}
+                    if len(keys) == 1:
+                        local_key = next(iter(keys))
+                        constant = _packed_constant(binding.targets, cell_port.bits, local_types[local_key], providers)
+                        if constant is not None:
+                            local_constants[local_key].add(constant)
+                            continue
                     for target, source in zip(
                         binding.targets,
                         cell_port.bits,

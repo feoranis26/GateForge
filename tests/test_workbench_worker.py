@@ -243,6 +243,15 @@ class WorkbenchWorkerTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             output = Path(directory) / "blueprint.json"
+            options = {"factorio": {"input_drivers": "constant", "input_values": {"a": "0xffffffff", "b": 2}, "output_lamps": True}}
+            realized = client.request(WorkerCommand.REALIZE, {"provider_options": options})
+            identifier = realized.payload["snapshot"]["selected_realization"]
+            client.request(WorkerCommand.SELECT_REALIZATION, {"identifier": identifier})
+            visual = client.request(WorkerCommand.BUILD_VISUAL_DOCUMENT, {"provider_options": options})
+            self.assertEqual(visual.payload["snapshot"]["selected_realization"], identifier)
+            self.assertIn("factorio:finalized", {item["identifier"] for item in visual.payload["document"]["views"]})
+            artifact_path = Path(directory) / "realization.json"
+            client.request(WorkerCommand.SAVE_ARTIFACT, {"kind": "realization", "path": str(artifact_path)})
             event = client.request(
                 WorkerCommand.EXPORT_FACTORIO_BLUEPRINT,
                 {
@@ -262,6 +271,16 @@ class WorkbenchWorkerTests(unittest.TestCase):
                 [item["name"] for item in blueprint["entities"]].count("small-lamp"),
                 1,
             )
+            artifact = json.loads(artifact_path.read_text())
+            self.assertEqual(len(blueprint["entities"]), len(artifact["design"]["entities"]))
+            with self.assertRaises(WorkerCommandError):
+                client.request(WorkerCommand.EXPORT_FACTORIO_BLUEPRINT, {
+                    "path": str(output), "label": None, "add_input_combinators": False,
+                    "input_values": {}, "add_output_lamps": False,
+                })
+            snapshot = client.request(WorkerCommand.SNAPSHOT).payload["snapshot"]
+            self.assertIsNone(snapshot["selected_realization"])
+            self.assertEqual(json.loads(output.read_text())["blueprint"], blueprint)
 
     def test_worker_rejects_invalid_factorio_export_options(self) -> None:
         client = WorkerClient(response_timeout=10.0)

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -28,6 +29,14 @@ from gateforge.visualization import (
     VisualTransform,
 )
 from gateforge.workbench.qt_canvas import VisualSceneView, YosysSvgView
+from gateforge.compiler import compilation_backend, materialize_search_candidates, start_compilation_search
+from gateforge.providers.factorio.finalization import finalize_add_fabric
+from gateforge.providers.factorio.realization import propose_add_fabrics
+from gateforge.providers.factorio.visualization import build_finalized_factorio_view
+from gateforge.session import CompilationSession
+from gateforge.graph import MaterialGraph
+from gateforge.placement import TopologicalPlacer
+from gateforge.visualization.build import build_visual_document
 
 
 class QtCanvasTests(unittest.TestCase):
@@ -45,6 +54,54 @@ class QtCanvasTests(unittest.TestCase):
 
         self.assertEqual(len(view.scene().items()), 1)
         self.assertFalse(view.scene().itemsBoundingRect().isEmpty())
+
+    def test_factorio_baseline_labels_fit_nonoverlapping_footprints(self) -> None:
+        session = CompilationSession(Path(__file__).parent / "fixtures" / "factorio" / "add32.v", target="factorio")
+        material = session.run_to_material()
+        graph = MaterialGraph.from_design(material, session.target_providers)
+        placement = TopologicalPlacer(session.default_placement_options, providers=session.target_providers).place(graph).finalize(graph)
+        scene = build_visual_document(material, graph, placement, session.target_providers, realized_views=()).views[0].scenes[0]
+        self.assertTrue(all(not first.world_bounds.intersects(second.world_bounds) for index, first in enumerate(scene.elements) for second in scene.elements[index + 1:]))
+        view = VisualSceneView(scene)
+        self.addCleanup(view.close)
+        by_id = {item.identifier: item for item in scene.elements}
+        for identifier, group in view._element_items.items():
+            bounds = by_id[identifier].descriptor.bounds
+            rectangle = QRectF(bounds.min_x, bounds.min_y, bounds.width, bounds.height)
+            for label in view._label_items:
+                if label.parentItem() == group:
+                    self.assertTrue(rectangle.contains(label.mapRectToParent(label.boundingRect())))
+        for width, height in ((960, 540), (360, 480)):
+            image = QImage(width, height, QImage.Format.Format_ARGB32)
+            image.fill(QColor("#ffffff"))
+            painter = QPainter(image)
+            view.scene().render(painter, QRectF(0, 0, width, height))
+            painter.end()
+            self.assertGreater(len({image.pixelColor(column, row).rgba() for column in range(0, width, 4) for row in range(0, height, 4)}), 5)
+
+    def test_finalized_factorio_inventory_renders_to_pixels_without_overlaps(self) -> None:
+        backend = compilation_backend("factorio")
+        path = Path(__file__).parent / "fixtures" / "factorio" / "add32.v"
+        search = start_compilation_search(str(path), target="factorio", behavior_lowerer=backend.behavior_lowerer).finish()
+        baseline = materialize_search_candidates(search, backend.target_providers).candidates[0]
+        assert baseline.behavior is not None
+        fabric = propose_add_fabrics(baseline.material, baseline.behavior)[0]
+        finalized = finalize_add_fabric(fabric, baseline.material, baseline.behavior.graph, input_drivers="constant", output_lamps=True)
+        scene = build_finalized_factorio_view(finalized).scenes[0]
+        entity_elements = [item for item in scene.elements if item.identifier.startswith("factorio-entity:")]
+        self.assertEqual(len(entity_elements), len(finalized.entities))
+        self.assertTrue(all(not left.world_bounds.intersects(right.world_bounds) for index, left in enumerate(entity_elements) for right in entity_elements[index + 1:]))
+        view = VisualSceneView(scene)
+        view.set_overlays(wires=True, labels=False, bounds=False, collisions=False)
+        for width, height in ((640, 360), (320, 480)):
+            image = QImage(width, height, QImage.Format.Format_ARGB32)
+            image.fill(QColor("#ffffff"))
+            painter = QPainter(image)
+            view.scene().render(painter, QRectF(0, 0, width, height))
+            painter.end()
+            colors = {image.pixelColor(column, row).rgba() for column in range(0, width, 4) for row in range(0, height, 4)}
+            self.assertGreater(len(colors), 5)
+        view.close()
 
     def test_visual_scene_renders_all_primitive_types_to_pixels(self) -> None:
         bounds = VisualBounds.centered(120.0, 80.0)

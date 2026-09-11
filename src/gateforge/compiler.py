@@ -9,6 +9,13 @@ from pathlib import Path
 from pyosys import libyosys as ys
 
 from gateforge.backend import CompilationBackend
+from gateforge.behavior_source import (
+    BehaviorCapture,
+    BehaviorLowerer,
+    MaterialBehaviorBoundary,
+    YosysCombinationalBehaviorLowerer,
+    bind_material_behavior,
+)
 from gateforge.design import DesignContext
 from gateforge.hierarchy import (
     SynthesisHierarchyPolicy,
@@ -34,6 +41,13 @@ from gateforge.providers.factorio.mapping import FactorioAddMapper
 from gateforge.providers.factorio.intrinsics import FactorioLampIntrinsicMapper
 from gateforge.providers.factorio.objects import make_factorio_provider
 from gateforge.placement import TopologicalPlacementOptions
+from gateforge.realization import (
+    DirectMaterialRealizationStrategy,
+    RealizationError,
+    RealizationInfeasibleError,
+    RealizationOptions,
+    RealizationOutcome,
+)
 from gateforge.search import (
     CompilationSearch,
     CompilationSearchSession,
@@ -55,6 +69,62 @@ class MaterialCompilationResult:
     report: MappingSearchReport
 
 
+@dataclass(frozen=True, slots=True)
+class MaterialCompilationCandidate:
+    context: DesignContext
+    state: CompilationIntermediateState
+    material: MaterialDesign
+    score: TerminalCandidateScore
+    behavior: BehaviorCapture | None = None
+    behavior_boundary: MaterialBehaviorBoundary | None = None
+
+    @property
+    def baseline_order(self) -> tuple[float, int, str, str]:
+        return (
+            self.score.provider_object_cost,
+            self.score.object_count,
+            self.score.material_digest,
+            self.score.candidate.value,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialCompilationCandidates:
+    candidates: tuple[MaterialCompilationCandidate, ...]
+    report: MappingSearchReport
+
+
+@dataclass(frozen=True, slots=True)
+class RealizedCompilationCandidate:
+    baseline: MaterialCompilationCandidate
+    outcome: RealizationOutcome
+
+    @property
+    def selection_order(self) -> tuple[float, tuple[float, int, str, str], str]:
+        return (
+            self.outcome.score.total,
+            self.baseline.baseline_order,
+            self.outcome.artifact_digest(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RealizationRejection:
+    candidate: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class RealizationCompilationResult:
+    materialized: MaterialCompilationCandidates
+    candidates: tuple[RealizedCompilationCandidate, ...]
+    rejections: tuple[RealizationRejection, ...]
+
+    @property
+    def winner(self) -> RealizedCompilationCandidate:
+        return self.candidates[0]
+
+
 def compilation_backend(
     target: str = LBP_PROVIDER,
     register_style: LBPRegisterStyle = LBPRegisterStyle.COMPACT,
@@ -72,13 +142,22 @@ def compilation_backend(
                 LBPCombinatorialLowLevelGateMapper(),
             ),
             placement_options=TopologicalPlacementOptions(),
+            realization_strategy=DirectMaterialRealizationStrategy(),
         )
     if target == FACTORIO_PROVIDER:
+        from gateforge.providers.factorio.strategy import FactorioRealizationStrategy
+
         provider = make_factorio_provider()
+        realization = FactorioRealizationStrategy()
         return CompilationBackend(
             identifier=FACTORIO_PROVIDER,
             target_providers={FACTORIO_PROVIDER: provider},
             mapping_providers=(FactorioLampIntrinsicMapper(), FactorioAddMapper()),
+            realization_strategy=realization,
+            realization_presenter=realization,
+            behavior_lowerer=YosysCombinationalBehaviorLowerer(
+                observation_ports=(("GF_Lamp", "in"),)
+            ),
             placement_options=TopologicalPlacementOptions(
                 column_pitch=6.0,
                 row_pitch=3.0,
@@ -118,7 +197,7 @@ def design_preprocess(path: str) -> DesignContext:
     )
     context.run_pass(f"read_verilog {json.dumps(os.path.abspath(path))}")
     context.run_pass("hierarchy -check -auto-top")
-    context.run_pass("proc")
+    context.run_pass("proc -noopt")
     return context
 
 
@@ -156,6 +235,7 @@ def start_compilation_search(
         mode=MappingSearchMode.GREEDY
     ),
     target: str = LBP_PROVIDER,
+    behavior_lowerer: BehaviorLowerer | None = None,
 ) -> CompilationSearchSession:
     resolved_stages = tuple(default_mapping_stages() if stages is None else stages)
     resolved_mapping_providers = (
@@ -170,12 +250,13 @@ def start_compilation_search(
     )
     context = design_preprocess(path)
     apply_synthesis_hierarchy(context, synthesis_hierarchy)
+    behavior = None if behavior_lowerer is None else behavior_lowerer.lower(context.snapshot())
     state = CompilationIntermediateState.empty(context.revision)
     return CompilationSearch(
         Mapper(resolved_mapping_providers),
         resolved_target_providers,
         mapping_search,
-    ).start(context, state, resolved_stages)
+    ).start(context, state, resolved_stages, behavior=behavior)
 
 
 def search_source(
@@ -231,19 +312,11 @@ def compile_source(
     return winner.restore_context(), winner.state
 
 
-def materialize_search_result(
+def materialize_search_candidates(
     result: MappingSearchResult,
     target_providers: Mapping[str, TargetProvider],
-) -> MaterialCompilationResult:
-    evaluated: list[
-        tuple[
-            tuple[float, int, str, str],
-            DesignContext,
-            CompilationIntermediateState,
-            MaterialDesign,
-            TerminalCandidateScore,
-        ]
-    ] = []
+) -> MaterialCompilationCandidates:
+    evaluated: list[MaterialCompilationCandidate] = []
     residual_details: list[str] = []
     for candidate in result.candidates:
         context = candidate.restore_context()
@@ -271,37 +344,137 @@ def materialize_search_result(
             decisions=candidate.decisions,
         )
         evaluated.append(
-            (
-                (
-                    object_cost,
-                    len(material.objects),
-                    material.get_digest().value,
-                    candidate.identifier.value,
-                ),
+            MaterialCompilationCandidate(
                 context,
                 state,
                 material,
                 terminal_score,
+                result.behavior,
+                None if result.behavior is None else bind_material_behavior(material, result.behavior),
             )
         )
     if not evaluated:
         details = ", ".join(sorted(set(residual_details)))
         raise RuntimeError(f"Design contains unmapped cells: {details}")
-    _, context, state, material, winner_score = min(
-        evaluated,
-        key=lambda item: item[0],
-    )
     report = replace(
         result.report,
         terminal_scores=tuple(
             sorted(
-                (item[4] for item in evaluated),
+                (item.score for item in evaluated),
                 key=lambda item: item.candidate.value,
             )
         ),
-        winner=winner_score.candidate,
+        winner=None,
     )
-    return MaterialCompilationResult(context, state, material, report)
+    return MaterialCompilationCandidates(
+        tuple(sorted(evaluated, key=lambda item: item.score.candidate.value)),
+        report,
+    )
+
+
+def materialize_search_result(
+    result: MappingSearchResult,
+    target_providers: Mapping[str, TargetProvider],
+) -> MaterialCompilationResult:
+    materialized = materialize_search_candidates(result, target_providers)
+    winner = min(materialized.candidates, key=lambda item: item.baseline_order)
+    return MaterialCompilationResult(
+        winner.context,
+        winner.state,
+        winner.material,
+        replace(materialized.report, winner=winner.score.candidate),
+    )
+
+
+def realize_search_result(
+    result: MappingSearchResult,
+    backend: CompilationBackend,
+    *,
+    options: RealizationOptions | None = None,
+) -> RealizationCompilationResult:
+    return realize_material_candidates(
+        materialize_search_candidates(result, backend.target_providers), backend, options=options
+    )
+
+
+def realize_material_candidates(
+    materialized: MaterialCompilationCandidates,
+    backend: CompilationBackend,
+    *,
+    options: RealizationOptions | None = None,
+) -> RealizationCompilationResult:
+    from gateforge.realization import RealizationProblem
+
+    strategy = backend.realization_strategy
+    if strategy is None:
+        raise RealizationError(
+            f"Backend {backend.identifier!r} has no realization strategy"
+        )
+    resolved_options = options or RealizationOptions(placement=backend.placement_options)
+    candidates: list[RealizedCompilationCandidate] = []
+    rejections: list[RealizationRejection] = []
+    for baseline in materialized.candidates:
+        generated = False
+        try:
+            problem = RealizationProblem(baseline.material, backend.target_providers, baseline.behavior, baseline.behavior_boundary)
+            source_aware = getattr(strategy, "realize_problem", None)
+            outcomes = (
+                source_aware(problem, resolved_options) if source_aware is not None
+                else strategy.realize(baseline.material, backend.target_providers, resolved_options)
+            )
+            for outcome in outcomes:
+                if outcome.artifact.target != backend.identifier:
+                    raise RealizationError("Realization artifact targets a different backend")
+                outcome.artifact.validate(baseline.material, backend.target_providers)
+                outcome.artifact_digest()
+                candidates.append(RealizedCompilationCandidate(baseline, outcome))
+                generated = True
+        except RealizationInfeasibleError as error:
+            rejections.append(RealizationRejection(baseline.score.candidate.value, str(error)))
+            continue
+        if not generated:
+            rejections.append(
+                RealizationRejection(
+                    baseline.score.candidate.value, "Strategy produced no realizations"
+                )
+            )
+    if not candidates:
+        details = "; ".join(item.reason for item in rejections)
+        raise RealizationInfeasibleError(f"No feasible realizations: {details}")
+    return RealizationCompilationResult(
+        materialized,
+        tuple(sorted(candidates, key=lambda item: item.selection_order)),
+        tuple(rejections),
+    )
+
+
+def compile_realization(
+    path: str,
+    *,
+    backend: CompilationBackend | None = None,
+    stages: Sequence[MappingStage] | None = None,
+    synthesis_hierarchy: SynthesisHierarchyPolicy = SynthesisHierarchyPolicy(),
+    mapping_search: MappingSearchOptions = MappingSearchOptions(
+        mode=MappingSearchMode.GREEDY
+    ),
+    options: RealizationOptions | None = None,
+) -> RealizationCompilationResult:
+    resolved_backend = compilation_backend() if backend is None else backend
+    if resolved_backend.realization_strategy is None:
+        raise RealizationError(
+            f"Backend {resolved_backend.identifier!r} has no realization strategy"
+        )
+    result = start_compilation_search(
+        path,
+        stages=stages,
+        mapping_providers=resolved_backend.mapping_providers,
+        target_providers=resolved_backend.target_providers,
+        synthesis_hierarchy=synthesis_hierarchy,
+        mapping_search=mapping_search,
+        target=resolved_backend.identifier,
+        behavior_lowerer=resolved_backend.behavior_lowerer,
+    ).finish()
+    return realize_search_result(result, resolved_backend, options=options)
 
 
 def compile_material(

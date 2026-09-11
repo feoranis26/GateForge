@@ -325,6 +325,10 @@ uv run gateforge compile design.v \
 
 A detailed search report can be written with `--emit-search-report`.
 
+### Experimental Realization
+
+Workbench Place builds the final Factorio placement, including circuit and power wiring. It supports 32-bit addition, bitwise operations, literals, signed/unsigned comparisons, Boolean operators and conditional selection, with bit-vector equivalence checks. Examples include [mixed word logic](tests/fixtures/factorio/bitwise32.v) and [combinational if/else](tests/fixtures/factorio/conditional32.v). Boolean inputs must be 0 or 1; word conditions use nonzero truth. The Placement view, saved placement and blueprint export use the selected candidate; the Entities panel lists its prototypes, operations and tile coordinates. Changing driver, lamp or power-layout options rebuilds the candidates. Power layout defaults to Grid, with Compact available in the Factorio toolbar. [HDL port bindings](tests/fixtures/factorio/bound_add32.v) declare virtual signals on shared bus terminals. Conditional lowering is correctness-first, not minimal. General width conversion, case/parallel selection, stateful logic, joint optimization and Factorio 2.0.77 in-game acceptance remain pending. Inputs must stay stable through the reported settling time; tick-aligned streaming is not supported. Existing material/placement CLI workflows remain available.
+
 ## Intermediate artifacts
 
 GateForge can expose several intermediate representations for debugging and tooling:

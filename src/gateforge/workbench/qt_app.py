@@ -255,6 +255,14 @@ class WorkbenchWindow(QMainWindow):
         self.action_place.setObjectName("actionPlace")
         self.action_place.triggered.connect(self.place)
 
+        self.action_realize = QAction(
+            style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload), "Realize", self,
+        )
+        self.action_realize.setObjectName("actionRealize")
+        self.action_realize.setText("Re-place")
+        self.action_realize.setToolTip("Rebuild final placement candidates using the current options")
+        self.action_realize.triggered.connect(self.realize)
+
         self.action_fit = QAction("Fit", self)
         self.action_fit.setObjectName("actionFit")
         self.action_fit.setShortcut(QKeySequence("F"))
@@ -281,6 +289,7 @@ class WorkbenchWindow(QMainWindow):
             ("report", "Search Report"),
             ("placement", "Placement"),
             ("visualization", "Visual Document"),
+            ("realization", "Realized Artifact"),
         ):
             action = QAction(label, self)
             action.setObjectName(f"actionSave{kind.title()}")
@@ -320,6 +329,7 @@ class WorkbenchWindow(QMainWindow):
             self.action_stop,
             self.action_compile,
             self.action_place,
+            self.action_realize,
         ):
             toolbar.addAction(action)
 
@@ -418,10 +428,19 @@ class WorkbenchWindow(QMainWindow):
             "Generate a lamp for each top-level output"
         )
         self.factorio_toolbar.addWidget(self.add_output_lamps_check)
+        self.factorio_toolbar.addSeparator()
+        self.factorio_toolbar.addWidget(QLabel("Power layout"))
+        self.power_layout_combo = QComboBox()
+        self.power_layout_combo.setObjectName("powerLayoutCombo")
+        self.power_layout_combo.addItem("Grid", "grid")
+        self.power_layout_combo.addItem("Compact", "compact")
+        self.power_layout_combo.setToolTip("Supply-pole layout; circuit poles connect to the grid with short drops")
+        self.factorio_toolbar.addWidget(self.power_layout_combo)
         self._factorio_controls = (
             self.add_input_combinators_check,
             self.input_values_button,
             self.add_output_lamps_check,
+            self.power_layout_combo,
         )
         self.add_input_combinators_check.toggled.connect(
             self._realization_options_changed
@@ -429,6 +448,7 @@ class WorkbenchWindow(QMainWindow):
         self.add_output_lamps_check.toggled.connect(
             self._realization_options_changed
         )
+        self.power_layout_combo.currentIndexChanged.connect(lambda _index: self._realization_options_changed())
         self._update_factorio_controls()
         self.physical_hierarchy_combo.currentTextChanged.connect(
             lambda _text: self._update_actions()
@@ -520,6 +540,28 @@ class WorkbenchWindow(QMainWindow):
             self._candidate_selected
         )
         inspector_tabs.addTab(self.candidates, "Branches")
+
+        self.realizations = QTreeWidget()
+        self.realizations.setObjectName("realizationCandidates")
+        self.realizations.setHeaderLabels(("Candidate", "Cost", "Adders", "Ticks", "Status"))
+        self.realizations.setAlternatingRowColors(True)
+        self.realizations.setToolTip("Select the physical candidate used for visualization and export")
+        self.realizations.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, 5):
+            self.realizations.header().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        self.realizations.currentItemChanged.connect(self._realization_selected)
+        inspector_tabs.addTab(self.realizations, "Realizations")
+
+        self.entities = QTreeWidget()
+        self.entities.setObjectName("entityList")
+        self.entities.setHeaderLabels(("Entity", "Prototype", "Role", "X", "Y"))
+        self.entities.setAlternatingRowColors(True)
+        self.entities.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, 5):
+            self.entities.header().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        self.entities.header().setStretchLastSection(False)
+        self.entities.currentItemChanged.connect(self._entity_selected)
+        inspector_tabs.addTab(self.entities, "Entities")
 
         self.proposals = _table(self._proposal_model, "proposalTable")
         inspector_tabs.addTab(self.proposals, "Proposals")
@@ -656,6 +698,7 @@ class WorkbenchWindow(QMainWindow):
                         else None
                     ),
                     "generated_hierarchy": self.generated_hierarchy_combo.currentText(),
+                    "provider_options": self._provider_options_payload(),
                 },
             ),
             self._after_placement,
@@ -761,6 +804,7 @@ class WorkbenchWindow(QMainWindow):
                     ),
                     "input_values": options["input_values"],
                     "add_output_lamps": options["output_lamps"],
+                    "power_layout": options["power_layout"],
                 },
             ),
             lambda event: self.statusBar().showMessage(
@@ -802,6 +846,53 @@ class WorkbenchWindow(QMainWindow):
         self._accept_snapshot_event(event, select_candidate=False)
         self._build_visual_document()
 
+    def _clear_realized_selection(self) -> None:
+        self.set_visual_document_empty()
+        if self.snapshot is not None:
+            self.snapshot = {
+                **self.snapshot, "phase": "placed", "selected_realization": None,
+                "realization_winner": None, "realizations": [],
+                "artifacts": {**_mapping(self.snapshot.get("artifacts")), "placement": None, "realization": None, "visualization": None},
+            }
+            self._apply_snapshot(self.snapshot)
+
+    def realize(self) -> None:
+        if self._busy or self._phase() not in {"placed", "realized"}:
+            return
+        self._clear_realized_selection()
+        self._run_worker(
+            "Realizing physical candidates",
+            lambda: self.worker.request(WorkerCommand.REALIZE, {"provider_options": self._provider_options_payload()}),
+            self._after_realization,
+        )
+
+    def _after_realization(self, event: WorkerEvent) -> None:
+        self._accept_snapshot_event(event, select_candidate=False)
+        self._build_visual_document()
+
+    def _realization_selected(self, item: QTreeWidgetItem | None, _previous=None) -> None:
+        if item is None or self._busy:
+            return
+        identifier = item.data(0, Qt.ItemDataRole.UserRole)
+        candidates = _sequence((self.snapshot or {}).get("realizations"))
+        candidate = next((_mapping(value) for value in candidates if _mapping(value).get("identifier") == identifier), None)
+        if candidate is None:
+            return
+        values = [("Identity", "Digest", str(candidate.get("digest"))), ("Identity", "Mapping candidate", str(candidate.get("mapping_candidate")))]
+        values.extend(("Physical", str(name), str(value)) for name, value in _mapping(candidate.get("details")).items())
+        for cost in _sequence(candidate.get("costs")):
+            component = _mapping(cost)
+            values.append(("Weighted cost", str(component.get("name")), f"{component.get('value')} x {component.get('weight')} = {component.get('contribution')}"))
+        self._show_properties("Realization", values)
+        if identifier == (self.snapshot or {}).get("selected_realization"):
+            return
+        self.set_visual_document_empty()
+        self._run_worker(
+            "Selecting realization",
+            lambda: self.worker.request(WorkerCommand.SELECT_REALIZATION, {"identifier": identifier}),
+            self._after_realization,
+        )
+
     def _build_visual_document(self) -> None:
         if self._phase() not in {"placed", "realized"}:
             return
@@ -830,10 +921,13 @@ class WorkbenchWindow(QMainWindow):
         self._visual_tabs.clear()
         self._scene_tabs.clear()
         self._scene_canvases.clear()
+        self.entities.clear()
         for view in document.views:
             widget = self._visual_view_widget(view)
             self._visual_tabs.append(widget)
-            label = "Placement" if view.identifier == "material" else view.label
+            label = (
+                "Placement" if view.identifier == "material" or (self.snapshot or {}).get("supports_realization") else view.label
+            )
             self.content_tabs.addTab(widget, label)
         if self._visual_tabs:
             self.content_tabs.setCurrentWidget(self._visual_tabs[-1])
@@ -852,6 +946,21 @@ class WorkbenchWindow(QMainWindow):
     def _scene_canvas(self, scene) -> VisualSceneView:
         canvas = VisualSceneView(scene)
         self._scene_canvases.append(canvas)
+        for element in scene.elements:
+            if not element.collision_enabled:
+                continue
+            properties = {item.name: item.value for item in element.descriptor.properties}
+            row = QTreeWidgetItem((
+                properties.get("ID", element.identifier),
+                properties.get("Prototype", element.descriptor.label),
+                properties.get("Role", ""),
+                properties.get("Tile X", f"{element.transform.x:g}"),
+                properties.get("Tile Y", f"{element.transform.y:g}"),
+            ))
+            row.setData(0, Qt.ItemDataRole.UserRole, (len(self._scene_canvases) - 1, element.identifier))
+            for column in range(5):
+                row.setToolTip(column, row.text(column))
+            self.entities.addTopLevelItem(row)
         canvas.set_overlays(
             wires=self.action_wires.isChecked(),
             labels=self.action_labels.isChecked(),
@@ -875,6 +984,23 @@ class WorkbenchWindow(QMainWindow):
         tabs, index = target
         self.content_tabs.setCurrentWidget(tabs)
         tabs.setCurrentIndex(index)
+
+    def _entity_selected(self, item: QTreeWidgetItem | None, _previous=None) -> None:
+        if item is None:
+            return
+        index, identifier = item.data(0, Qt.ItemDataRole.UserRole)
+        canvas = self._scene_canvases[index]
+        scene = canvas.visual_scene
+        if scene is None:
+            return
+        self._activate_scene(scene.identifier)
+        if self.content_tabs.indexOf(canvas) >= 0:
+            self.content_tabs.setCurrentWidget(canvas)
+        canvas.scene().clearSelection()
+        graphics_item = canvas._element_items[identifier]
+        graphics_item.setSelected(True)
+        canvas.centerOn(graphics_item)
+        self._visual_element_selected(scene, canvas, identifier)
 
     def _visual_element_selected(
         self,
@@ -1075,6 +1201,7 @@ class WorkbenchWindow(QMainWindow):
         self._proposal_model.set_snapshot(snapshot)
         self._update_pipeline(snapshot)
         self._update_artifacts(snapshot)
+        self._update_realizations(snapshot)
         self._update_actions()
         self.snapshot_changed.emit(self.snapshot)
 
@@ -1103,7 +1230,7 @@ class WorkbenchWindow(QMainWindow):
     def _update_artifacts(self, snapshot: Mapping[str, object]) -> None:
         self.material_summary.clear()
         artifacts = _mapping(snapshot.get("artifacts"))
-        for kind in ("material", "placement", "visualization"):
+        for kind in ("material", "placement", "realization", "visualization"):
             value = artifacts.get(kind)
             if not isinstance(value, Mapping):
                 continue
@@ -1114,6 +1241,30 @@ class WorkbenchWindow(QMainWindow):
             for name, detail in _mapping(value.get("details")).items():
                 QTreeWidgetItem(item, (str(name), str(detail)))
         self.material_summary.expandAll()
+
+    def _update_realizations(self, snapshot: Mapping[str, object]) -> None:
+        self.realizations.blockSignals(True)
+        self.realizations.clear()
+        for index, value in enumerate(_sequence(snapshot.get("realizations")), start=1):
+            candidate = _mapping(value)
+            details = _mapping(candidate.get("details"))
+            identifier = candidate.get("identifier")
+            selected = identifier == snapshot.get("selected_realization")
+            winner = identifier == snapshot.get("realization_winner")
+            status = ", ".join(label for label, enabled in (("Selected", selected), ("Winner", winner)) if enabled)
+            item = QTreeWidgetItem(self.realizations, (
+                str(index), f"{float(candidate.get('score', 0)):g}",
+                str(details.get("combinators", "")), str(details.get("settling_ticks", "")), status,
+            ))
+            item.setData(0, Qt.ItemDataRole.UserRole, identifier)
+            item.setToolTip(0, str(candidate.get("digest", "")))
+            if selected:
+                self.realizations.setCurrentItem(item)
+        for rejection in _sequence(snapshot.get("realization_rejections")):
+            value = _mapping(rejection)
+            item = QTreeWidgetItem(self.realizations, ("Rejected", "", "", "", str(value.get("reason", ""))))
+            item.setToolTip(0, str(value.get("candidate", "")))
+        self.realizations.blockSignals(False)
 
     def _select_frontier_candidate(self) -> None:
         if self._candidate_model.rowCount() == 0:
@@ -1217,6 +1368,10 @@ class WorkbenchWindow(QMainWindow):
             and not self._busy
         )
         self.action_place.setEnabled(phase == "materialized" and not self._busy)
+        supports_realization = bool((self.snapshot or {}).get("supports_realization"))
+        self.action_realize.setVisible(supports_realization)
+        self.action_realize.setEnabled(supports_realization and phase in {"placed", "realized"} and not self._busy)
+        self.realizations.setEnabled(not self._busy)
         placement_editable = (
             has_source
             and phase not in {"placed", "realized"}
@@ -1246,8 +1401,9 @@ class WorkbenchWindow(QMainWindow):
             isinstance(artifacts.get("visualization"), Mapping) and not self._busy
         )
         self.action_export.setEnabled(
-            isinstance(artifacts.get("placement"), Mapping) and not self._busy
+            isinstance(artifacts.get("realization" if supports_realization else "placement"), Mapping) and not self._busy
         )
+        self.save_actions["realization"].setEnabled(isinstance(artifacts.get("realization"), Mapping) and not self._busy)
 
     def _edit_factorio_inputs(self) -> None:
         dialog = FactorioInputsDialog(self._factorio_input_values, self)
@@ -1259,8 +1415,8 @@ class WorkbenchWindow(QMainWindow):
 
     def _realization_options_changed(self, _checked: bool = False) -> None:
         self._update_actions()
-        if self.target == "factorio" and self._phase() == "realized":
-            self._build_visual_document()
+        if self.target == "factorio" and self._phase() in {"placed", "realized"}:
+            self.realize()
 
     def _update_factorio_controls(self) -> None:
         is_factorio = self.target == "factorio"
@@ -1279,6 +1435,7 @@ class WorkbenchWindow(QMainWindow):
                 else {}
             ),
             "output_lamps": self.add_output_lamps_check.isChecked(),
+            "power_layout": self.power_layout_combo.currentData(),
         }
 
     def _provider_options_payload(self) -> dict[str, dict[str, object]]:
@@ -1289,6 +1446,7 @@ class WorkbenchWindow(QMainWindow):
     def _clear_session_views(self) -> None:
         self.pipeline.clear()
         self.material_summary.clear()
+        self.realizations.clear()
         self._candidate_model.set_snapshot({})
         self._proposal_model.set_snapshot({})
         self._claims_model.set_candidate_details(None)
@@ -1297,6 +1455,7 @@ class WorkbenchWindow(QMainWindow):
         self.set_visual_document_empty()
 
     def set_visual_document_empty(self) -> None:
+        self.entities.clear()
         for widget in self._visual_tabs:
             index = self.content_tabs.indexOf(widget)
             if index >= 0:

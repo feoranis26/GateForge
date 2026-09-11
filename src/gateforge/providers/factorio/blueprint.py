@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import TYPE_CHECKING
+
+from gateforge.target import ProviderConfiguration
+
+if TYPE_CHECKING:
+    from gateforge.providers.factorio.finalization import FactorioFinalizedDesign
 
 from gateforge.providers.factorio.configuration import (
     FactorioLampConfiguration,
@@ -118,23 +124,56 @@ class FactorioNetworkSelection:
 
 @dataclass(frozen=True, slots=True)
 class FactorioArithmeticControlBehavior:
-    first_signal: FactorioBlueprintSignal
-    second_signal: FactorioBlueprintSignal
+    first_signal: FactorioBlueprintSignal | int
+    second_signal: FactorioBlueprintSignal | int
     output_signal: FactorioBlueprintSignal
     first_networks: FactorioNetworkSelection
     second_networks: FactorioNetworkSelection
+    operation: str = "+"
+
+    def __post_init__(self) -> None:
+        if self.operation not in {"+", "*", "AND", "OR", "XOR"}:
+            raise FactorioBlueprintError("Unsupported Factorio arithmetic operation")
+        for operand in (self.first_signal, self.second_signal):
+            if not isinstance(operand, FactorioBlueprintSignal) and (isinstance(operand, bool) or not isinstance(operand, int) or not -(1 << 31) <= operand < (1 << 31)):
+                raise FactorioBlueprintError("Arithmetic operand must be a signal or signed int32 constant")
 
     def canonical_data(self) -> dict[str, object]:
-        return {
-            "arithmetic_conditions": {
-                "first_signal": self.first_signal.canonical_data(),
-                "second_signal": self.second_signal.canonical_data(),
-                "operation": "+",
-                "output_signal": self.output_signal.canonical_data(),
-                "first_signal_networks": self.first_networks.canonical_data(),
-                "second_signal_networks": self.second_networks.canonical_data(),
-            }
-        }
+        conditions = {"operation": self.operation, "output_signal": self.output_signal.canonical_data()}
+        for name, operand, networks in (("first", self.first_signal, self.first_networks), ("second", self.second_signal, self.second_networks)):
+            if isinstance(operand, FactorioBlueprintSignal):
+                conditions[f"{name}_signal"] = operand.canonical_data()
+                conditions[f"{name}_signal_networks"] = networks.canonical_data()
+            else:
+                conditions[f"{name}_constant"] = operand
+        return {"arithmetic_conditions": conditions}
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioDeciderControlBehavior:
+    first_signal: FactorioBlueprintSignal
+    second: FactorioBlueprintSignal | int
+    output_signal: FactorioBlueprintSignal
+    first_networks: FactorioNetworkSelection
+    second_networks: FactorioNetworkSelection
+    comparator: str
+
+    def __post_init__(self) -> None:
+        if self.comparator not in {"=", "!=", "<", "<=", ">", ">="}:
+            raise FactorioBlueprintError("Unsupported decider comparator")
+        if not isinstance(self.first_signal, FactorioBlueprintSignal):
+            raise FactorioBlueprintError("Decider first operand must be a signal")
+        if not isinstance(self.second, FactorioBlueprintSignal) and (isinstance(self.second, bool) or not isinstance(self.second, int) or not -(1 << 31) <= self.second < (1 << 31)):
+            raise FactorioBlueprintError("Decider second operand must be a signal or int32 constant")
+
+    def canonical_data(self) -> dict[str, object]:
+        condition = {"first_signal": self.first_signal.canonical_data(), "first_signal_networks": self.first_networks.canonical_data(), "comparator": {"!=": "\u2260", "<=": "\u2264", ">=": "\u2265"}.get(self.comparator, self.comparator), "compare_type": "and"}
+        if isinstance(self.second, FactorioBlueprintSignal):
+            condition["second_signal"] = self.second.canonical_data()
+            condition["second_signal_networks"] = self.second_networks.canonical_data()
+        else:
+            condition["constant"] = self.second
+        return {"decider_conditions": {"conditions": [condition], "outputs": [{"signal": self.output_signal.canonical_data(), "copy_count_from_input": False, "constant": 1}]}}
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,7 +202,9 @@ class FactorioLampControlBehavior:
 FactorioControlBehavior = (
     FactorioConstantControlBehavior
     | FactorioArithmeticControlBehavior
+    | FactorioDeciderControlBehavior
     | FactorioLampControlBehavior
+    | ProviderConfiguration
 )
 
 
@@ -277,6 +318,42 @@ class FactorioBlueprint:
         if self.label is not None:
             blueprint["label"] = self.label
         return {"blueprint": blueprint}
+
+
+def build_finalized_factorio_blueprint(
+    finalized: FactorioFinalizedDesign,
+    *,
+    label: str | None = None,
+) -> FactorioBlueprint:
+    from gateforge.providers.factorio.finalization import physical_connector
+
+    finalized.validate_physical()
+    entities = finalized.entities
+    entity_by_id = {item.identifier: item for item in entities}
+    numbers = {item.identifier: index for index, item in enumerate(entities, start=1)}
+    colors = {item.identifier: item.color for item in finalized.domains}
+
+    def connector(endpoint, color):
+        entity = entity_by_id[endpoint.entity]
+        physical = physical_connector(endpoint, entity)
+        return _connector_number(entity.prototype, physical.connector, color)
+
+    return FactorioBlueprint(
+        tuple(FactorioBlueprintEntity(
+            numbers[item.identifier], item.prototype, item.x, item.y,
+            _factorio_direction(item.angle) if item.prototype in {"arithmetic-combinator", "decider-combinator"} else None,
+            None if item.configuration.is_empty else item.configuration,
+        ) for item in entities),
+        tuple(sorted((
+            *(FactorioBlueprintWire(
+                numbers[wire.source.entity], connector(wire.source, colors[wire.domain]),
+                numbers[wire.target.entity], connector(wire.target, colors[wire.domain]),
+            ) for wire in finalized.wires),
+            *(FactorioBlueprintWire(numbers[segment.source], 5, numbers[segment.target], 5)
+              for segment in finalized.power_segments),
+        ))),
+        label,
+    )
 
 
 def build_factorio_blueprint(
@@ -462,18 +539,22 @@ def _blueprint_connector(
         raise FactorioBlueprintError(
             f"Factorio wire references unknown entity {entity_id!r}"
         )
+    return _connector_number(entity.prototype, connector, color)
+
+
+def _connector_number(prototype: str, connector: int, color: FactorioWireColor) -> int:
     color_offset = 0 if color == FactorioWireColor.RED else 1
-    if entity.prototype == "arithmetic-combinator":
+    if prototype in {"arithmetic-combinator", "decider-combinator"}:
         if connector == 1:
             return 1 + color_offset
         if connector == 2:
             return 3 + color_offset
         raise FactorioBlueprintError(
-            f"Arithmetic combinator {entity_id!r} has unsupported connector {connector}"
+            f"Arithmetic combinator has unsupported connector {connector}"
         )
     if connector != 1:
         raise FactorioBlueprintError(
-            f"Factorio entity {entity_id!r} has unsupported connector {connector}"
+            f"Factorio entity has unsupported connector {connector}"
         )
     return 1 + color_offset
 

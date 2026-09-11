@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 import hashlib
 import json
@@ -10,10 +10,15 @@ from pathlib import Path
 from gateforge.artifacts import write_json
 from gateforge.compiler import (
     MaterialCompilationResult,
+    MaterialCompilationCandidates,
+    RealizationCompilationResult,
+    RealizedCompilationCandidate,
     compilation_backend,
     default_mapping_providers,
     default_target_providers,
     materialize_search_result,
+    materialize_search_candidates,
+    realize_material_candidates,
     start_compilation_search,
 )
 from gateforge.design import DesignCheckpoint
@@ -33,6 +38,7 @@ from gateforge.placement import (
 )
 from gateforge.pipeline import MappingStage, default_mapping_stages
 from gateforge.provider import TargetProvider
+from gateforge.realization import RealizationOptions, RealizedPlacement
 from gateforge.search import (
     CompilationCandidate,
     CompilationCandidateId,
@@ -388,6 +394,11 @@ class SessionSnapshot:
     material: ArtifactSummary | None
     placement: ArtifactSummary | None
     visualization: ArtifactSummary | None
+    realizations: tuple[dict[str, object], ...] = ()
+    selected_realization: str | None = None
+    realization_winner: str | None = None
+    realization_rejections: tuple[dict[str, str], ...] = ()
+    supports_realization: bool = False
 
     def canonical_data(self) -> dict[str, object]:
         return {
@@ -410,6 +421,11 @@ class SessionSnapshot:
                 item.canonical_data() for item in self.terminal_scores
             ],
             "winner": self.winner,
+            "supports_realization": self.supports_realization,
+            "realizations": list(self.realizations),
+            "selected_realization": self.selected_realization,
+            "realization_winner": self.realization_winner,
+            "realization_rejections": list(self.realization_rejections),
             "artifacts": {
                 "material": (
                     None if self.material is None else self.material.canonical_data()
@@ -422,6 +438,7 @@ class SessionSnapshot:
                     if self.visualization is None
                     else self.visualization.canonical_data()
                 ),
+                "realization": next((item for item in self.realizations if item["identifier"] == self.selected_realization), None),
             },
         }
 
@@ -444,6 +461,7 @@ class CompilationSession:
         self.source_text = self.source.read_text(encoding="utf-8")
         self.stages = tuple(default_mapping_stages() if stages is None else stages)
         backend = compilation_backend(target)
+        self.backend = backend
         self.target = backend.identifier
         self.mapping_providers = tuple(
             backend.mapping_providers
@@ -464,6 +482,10 @@ class CompilationSession:
         self._compilation: MaterialCompilationResult | None = None
         self._graph: MaterialGraph | None = None
         self._placement: PlacedDesign | None = None
+        self._materialized: MaterialCompilationCandidates | None = None
+        self._realization: RealizationCompilationResult | None = None
+        self._selected_realization: RealizedCompilationCandidate | None = None
+        self._realization_options = RealizationOptions(placement=backend.placement_options)
         self._visualization: VisualDocument | None = None
         self._stage_summaries: list[StageSummary] = []
         self._candidates: dict[str, CompilationCandidate] = {}
@@ -474,7 +496,11 @@ class CompilationSession:
         return None if self._compilation is None else self._compilation.material
 
     @property
-    def placement(self) -> PlacedDesign | None:
+    def placement(self) -> PlacedDesign | RealizedPlacement | None:
+        if self.backend.realization_presenter is not None:
+            if self._selected_realization is None:
+                return None
+            return self.backend.realization_presenter.placement(self._selected_realization.outcome.artifact)
         return self._placement
 
     @property
@@ -489,6 +515,14 @@ class CompilationSession:
     def compilation_result(self) -> MaterialCompilationResult | None:
         return self._compilation
 
+    @property
+    def realization_result(self) -> RealizationCompilationResult | None:
+        return self._realization
+
+    @property
+    def selected_realization(self) -> RealizedCompilationCandidate | None:
+        return self._selected_realization
+
     def preprocess(self) -> SessionSnapshot:
         self._require_phase(CompilationSessionPhase.SOURCE_LOADED)
         self._search = start_compilation_search(
@@ -498,6 +532,7 @@ class CompilationSession:
             target_providers=self.target_providers,
             synthesis_hierarchy=self.synthesis_hierarchy,
             mapping_search=self.mapping_search,
+            behavior_lowerer=self.backend.behavior_lowerer if self.backend.realization_presenter is not None else None,
         )
         for candidate in self._search.frontier:
             self._index_candidate(candidate)
@@ -556,10 +591,12 @@ class CompilationSession:
         self._require_phase(CompilationSessionPhase.SEARCH_COMPLETE)
         if self._search_result is None:
             raise AssertionError("Complete compilation session has no search result")
-        self._compilation = materialize_search_result(
-            self._search_result,
-            self.target_providers,
-        )
+        if self.backend.realization_presenter is not None:
+            self._materialized = materialize_search_candidates(self._search_result, self.target_providers)
+            winner = min(self._materialized.candidates, key=lambda item: item.baseline_order)
+            self._compilation = MaterialCompilationResult(winner.context, winner.state, winner.material, replace(self._materialized.report, winner=winner.score.candidate))
+        else:
+            self._compilation = materialize_search_result(self._search_result, self.target_providers)
         self._graph = MaterialGraph.from_design(
             self._compilation.material,
             self.target_providers,
@@ -578,10 +615,22 @@ class CompilationSession:
         physical_hierarchy: PhysicalHierarchyPolicy = PhysicalHierarchyPolicy(),
         generated_hierarchy: GeneratedHierarchyPolicy = GeneratedHierarchyPolicy(),
         placer: Placer | None = None,
-    ) -> PlacedDesign:
-        self._require_phase(CompilationSessionPhase.MATERIALIZED)
+        provider_options: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> PlacedDesign | RealizedPlacement:
+        self._require_phase(CompilationSessionPhase.MATERIALIZED, CompilationSessionPhase.PLACED, CompilationSessionPhase.REALIZED)
         if self._graph is None:
             raise AssertionError("Materialized compilation session has no graph")
+        self._invalidate_realization()
+        self._realization_options = RealizationOptions(
+            placement=self.default_placement_options if options is None else options,
+            physical_hierarchy=physical_hierarchy, generated_hierarchy=generated_hierarchy,
+        )
+        if self.backend.realization_presenter is not None:
+            if placer is not None:
+                raise CompilationSessionError("Backend candidate placement does not accept a material placer")
+            self.realize(provider_options=provider_options)
+            assert self.placement is not None
+            return self.placement
         resolved_placer = placer or TopologicalPlacer(
             self.default_placement_options if options is None else options,
             providers=self.target_providers,
@@ -592,6 +641,65 @@ class CompilationSession:
         self.phase = CompilationSessionPhase.PLACED
         return self._placement
 
+    def _invalidate_realization(self) -> None:
+        self._realization = None
+        self._selected_realization = None
+        self._visualization = None
+        if self._placement is not None or self._materialized is not None:
+            self.phase = CompilationSessionPhase.PLACED
+
+    def realize(self, *, provider_options: Mapping[str, Mapping[str, object]] | None = None) -> RealizationCompilationResult:
+        self._require_phase(CompilationSessionPhase.MATERIALIZED, CompilationSessionPhase.PLACED, CompilationSessionPhase.REALIZED)
+        presenter = self.backend.realization_presenter
+        if presenter is None or self._materialized is None:
+            raise CompilationSessionError("Backend has no session realization capability")
+        self._invalidate_realization()
+        settings = presenter.normalize_options((provider_options or {}).get(self.target, {}))
+        options = replace(self._realization_options, provider_options=settings)
+        result = realize_material_candidates(
+            self._materialized,
+            replace(self.backend, target_providers=self.target_providers), options=options,
+        )
+        self._realization_options = options
+        self._realization = result
+        try:
+            self.select_realization(self._realization_id(result.winner))
+        except Exception:
+            self._invalidate_realization()
+            raise
+        return result
+
+    @staticmethod
+    def _realization_id(candidate: RealizedCompilationCandidate) -> str:
+        return f"{candidate.baseline.score.candidate.value}:{candidate.outcome.artifact_digest()}"
+
+    def select_realization(self, identifier: str) -> None:
+        if self._realization is None:
+            raise CompilationSessionError("Realization has not completed")
+        selected = next((item for item in self._realization.candidates if self._realization_id(item) == identifier), None)
+        if selected is None:
+            raise CompilationSessionError("Unknown realization candidate")
+        baseline = selected.baseline
+        graph = MaterialGraph.from_design(baseline.material, self.target_providers)
+        self._compilation = MaterialCompilationResult(baseline.context, baseline.state, baseline.material, replace(self._realization.materialized.report, winner=baseline.score.candidate))
+        self._graph = graph
+        self._selected_realization = selected
+        self._visualization = None
+        self.phase = CompilationSessionPhase.REALIZED
+
+    def _require_realization_options(self, provider_options) -> None:
+        presenter = self.backend.realization_presenter
+        if self._selected_realization is None or presenter is None:
+            raise CompilationSessionError("Realization must complete before view or export")
+        try:
+            settings = presenter.normalize_options((provider_options or {}).get(self.target, {}))
+        except (ValueError, TypeError):
+            self._invalidate_realization()
+            raise
+        if settings != self._realization_options.provider_options:
+            self._invalidate_realization()
+            raise CompilationSessionError("Realization options changed; realize again before view or export")
+
     def build_visual_document(
         self,
         *,
@@ -601,6 +709,11 @@ class CompilationSession:
             CompilationSessionPhase.PLACED,
             CompilationSessionPhase.REALIZED,
         )
+        if self.backend.realization_presenter is not None:
+            self._require_realization_options(provider_options)
+            assert self._selected_realization is not None
+            self._visualization = VisualDocument(self.backend.realization_presenter.views(self._selected_realization.outcome.artifact))
+            return self._visualization
         if self._compilation is None or self._graph is None or self._placement is None:
             raise AssertionError("Placed compilation session is missing artifacts")
         self._visualization = build_provider_visual_document(
@@ -625,6 +738,17 @@ class CompilationSession:
         return write_json(output_path, self._compilation.state.canonical_data())
 
     def save_report(self, output_path: str | Path) -> Path:
+        if self._realization is not None:
+            snapshot = self.snapshot()
+            return write_json(output_path, {
+                "schema_version": 1, "kind": "compilation-search-report",
+                "mapping": self._realization.materialized.report.canonical_data(),
+                "realizations": list(snapshot.realizations),
+                "selected_realization": snapshot.selected_realization,
+                "winner": snapshot.realization_winner,
+                "rejections": list(snapshot.realization_rejections),
+                "search_scope": "surviving mapping frontier and bounded physical proposals",
+            })
         if self._compilation is not None:
             report = self._compilation.report
         elif self._search_result is not None:
@@ -634,14 +758,25 @@ class CompilationSession:
         return write_json(output_path, report.canonical_data())
 
     def save_placement(self, output_path: str | Path) -> Path:
-        if self._placement is None:
+        placement = self.placement
+        if placement is None:
             raise CompilationSessionError("Placement has not been generated")
-        return write_json(output_path, self._placement.canonical_data())
+        return write_json(output_path, placement.canonical_data())
 
     def save_visual_document(self, output_path: str | Path) -> Path:
         if self._visualization is None:
             raise CompilationSessionError("Visualization has not been generated")
         return write_json(output_path, self._visualization.canonical_data())
+
+    def save_realization(self, output_path: str | Path) -> Path:
+        if self._selected_realization is None:
+            raise CompilationSessionError("Realization has not completed")
+        return write_json(output_path, self._selected_realization.outcome.artifact.canonical_data())
+
+    def export_realization(self, output_path: str | Path, *, provider_options=None, label: str | None = None) -> Path:
+        self._require_realization_options(provider_options)
+        assert self._selected_realization is not None and self.backend.realization_presenter is not None
+        return write_json(output_path, self.backend.realization_presenter.export(self._selected_realization.outcome.artifact, label=label))
 
     def export(
         self,
@@ -741,7 +876,24 @@ class CompilationSession:
             material=self._material_summary(),
             placement=self._placement_summary(),
             visualization=self._visualization_summary(),
+            supports_realization=self.backend.realization_presenter is not None,
+            realizations=tuple(self._realization_summary(item) for item in self._realization.candidates) if self._realization is not None else (),
+            selected_realization=None if self._selected_realization is None else self._realization_id(self._selected_realization),
+            realization_winner=None if self._realization is None else self._realization_id(self._realization.winner),
+            realization_rejections=tuple({"candidate": item.candidate, "reason": item.reason} for item in self._realization.rejections) if self._realization is not None else (),
         )
+
+    def _realization_summary(self, candidate: RealizedCompilationCandidate) -> dict[str, object]:
+        presenter = self.backend.realization_presenter
+        return {
+            "identifier": self._realization_id(candidate),
+            "digest": candidate.outcome.artifact_digest(),
+            "mapping_candidate": candidate.baseline.score.candidate.value,
+            "material_digest": candidate.baseline.material.get_digest().value,
+            "score": candidate.outcome.score.total,
+            "costs": [{"name": item.name, "value": item.value, "weight": item.weight, "contribution": item.contribution} for item in candidate.outcome.score.components],
+            "details": {} if presenter is None else presenter.details(candidate.outcome.artifact),
+        }
 
     def _index_candidate(
         self,
@@ -785,6 +937,9 @@ class CompilationSession:
         )
 
     def _placement_summary(self) -> ArtifactSummary | None:
+        placement = self.placement
+        if isinstance(placement, RealizedPlacement):
+            return ArtifactSummary("placement", _canonical_digest(placement.canonical_data()), (("entities", len(placement.entities)),))
         if self._placement is None:
             return None
         return ArtifactSummary(

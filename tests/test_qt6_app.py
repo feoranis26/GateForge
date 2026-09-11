@@ -1,8 +1,10 @@
 import os
+import json
 from pathlib import Path
 import subprocess
 import sys
 import unittest
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -138,6 +140,7 @@ class QtWorkbenchTests(unittest.TestCase):
                     "input_drivers": "constant",
                     "input_values": {"a": "0xffffffff", "b": "2"},
                     "output_lamps": True,
+                    "power_layout": "grid",
                 }
             },
         )
@@ -154,15 +157,157 @@ class QtWorkbenchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Duplicate.*a"):
             dialog.values()
 
+    def test_hdl_interface_bindings_reach_workbench_inspector(self) -> None:
+        window = WorkbenchWindow(target="factorio")
+        self.addCleanup(window.close)
+        self._wait_for_operation(window, lambda: window.open_source(FACTORIO_FIXTURE.parent / "bound_add32.v"))
+        window.compile_material()
+        self._wait_until(window, lambda: window._phase() == "materialized" and not window._busy)
+        window.place()
+        self._wait_until(window, lambda: window._document is not None and not window._busy)
+        scene = window._document.views[0].scenes[0]
+        interfaces = [{item.name: item.value for item in element.descriptor.properties if item.group == "Interface"} for element in scene.elements]
+        interfaces = [item for item in interfaces if "Circuit" in item]
+        self.assertEqual(len(interfaces), 2)
+        by_circuit = {item["Circuit"]: item for item in interfaces}
+        self.assertEqual(by_circuit["inputs"]["Port a"], "signal-A")
+        self.assertEqual(by_circuit["inputs"]["Port b"], "signal-B")
+        self.assertEqual(by_circuit["inputs"]["Color"], "green")
+        self.assertEqual(by_circuit["outputs"]["Port y"], "signal-C")
+        self.assertEqual(by_circuit["outputs"]["Port tap"], "signal-D")
+        self.assertEqual(by_circuit["outputs"]["Color"], "red")
+        self.assertTrue(window.action_export.isEnabled())
+
+    def test_bitwise_operations_reach_workbench_inspector(self) -> None:
+        window = WorkbenchWindow(target="factorio")
+        self.addCleanup(window.close)
+        self._wait_for_operation(window, lambda: window.open_source(FACTORIO_FIXTURE.parent / "bitwise32.v"))
+        window.compile_material()
+        self._wait_until(window, lambda: window._phase() == "materialized" and not window._busy)
+        window.place()
+        self._wait_until(window, lambda: window._document is not None and not window._busy)
+        scene = window._document.views[0].scenes[0]
+        operations = [item.value for element in scene.elements for item in element.descriptor.properties if item.name == "Operation"]
+        self.assertEqual(sorted(operations), ["+", "AND", "OR", "XOR", "XOR"])
+        self.assertTrue(window.action_export.isEnabled())
+
+    def test_conditional_process_reaches_workbench_inspector(self) -> None:
+        window = WorkbenchWindow(target="factorio")
+        self.addCleanup(window.close)
+        self._wait_for_operation(window, lambda: window.open_source(FACTORIO_FIXTURE.parent / "conditional32.v"))
+        window.compile_material()
+        self._wait_until(window, lambda: window._phase() == "materialized" and not window._busy)
+        window.place()
+        self._wait_until(window, lambda: window._document is not None and not window._busy)
+        scene = window._document.views[0].scenes[0]
+        properties = [{item.name: item.value for item in element.descriptor.properties} for element in scene.elements]
+        deciders = [item for item in properties if item.get("Prototype") == "decider-combinator"]
+        self.assertTrue(deciders)
+        self.assertTrue(all(item["Role"] == "Decider" and item["True output"] == "1" for item in deciders))
+        self.assertTrue(window.action_export.isEnabled())
+
     def test_factorio_option_change_rebuilds_realized_views(self) -> None:
         window = WorkbenchWindow(target="factorio")
         self.addCleanup(window.close)
         window.snapshot = {"phase": "realized", "artifacts": {}}
 
-        with patch.object(window, "_build_visual_document") as rebuild:
+        with patch.object(window, "realize") as rebuild:
             window.add_output_lamps_check.setChecked(True)
 
         rebuild.assert_called_once_with()
+
+    def test_factorio_workbench_owns_realization_and_rebuilds_options(self) -> None:
+        window = WorkbenchWindow(target="factorio")
+        self.addCleanup(window.close)
+        self._wait_for_operation(window, lambda: window.open_source(FACTORIO_FIXTURE))
+        window.compile_material()
+        self._wait_until(window, lambda: window._phase() == "materialized" and not window._busy)
+        with patch.object(window.worker, "request", wraps=window.worker.request) as requests:
+            window.place()
+            self._wait_until(window, lambda: window._phase() == "realized" and not window._busy and window._document is not None)
+        commands = [call.args[0] for call in requests.call_args_list]
+        self.assertEqual(commands.count(WorkerCommand.PLACE), 1)
+        self.assertNotIn(WorkerCommand.REALIZE, commands)
+        self.assertEqual(len(window._document.views), 1)
+        self.assertEqual(window.content_tabs.tabText(window.content_tabs.indexOf(window._visual_tabs[0])), "Placement")
+        scene = window._document.views[0].scenes[0]
+        inventory = [element for element in scene.elements if element.collision_enabled]
+        self.assertEqual(window.entities.topLevelItemCount(), len(inventory))
+        pole_row = next(window.entities.topLevelItem(index) for index in range(window.entities.topLevelItemCount()) if "external pole" in window.entities.topLevelItem(index).text(2))
+        self.assertEqual(pole_row.text(1), "medium-electric-pole")
+        window.entities.setCurrentItem(pole_row)
+        self.assertGreater(window.inspector.topLevelItemCount(), 0)
+        self.assertTrue(window._scene_canvases[0].scene().selectedItems())
+        self.assertTrue(window.action_realize.isVisible())
+        self.assertEqual(window.realizations.topLevelItemCount(), 1)
+        self.assertTrue(window.action_export.isEnabled())
+        initial = window.snapshot["selected_realization"]
+        self.assertIn("factorio:finalized", {view.identifier for view in window._document.views})
+        window.add_output_lamps_check.setChecked(True)
+        self.assertFalse(window.action_export.isEnabled())
+        self.assertIsNone(window._document)
+        self.assertEqual(window.entities.topLevelItemCount(), 0)
+        self.assertFalse(window.save_actions["placement"].isEnabled())
+        self._wait_until(window, lambda: window._phase() == "realized" and not window._busy and window._document is not None)
+        self.assertNotEqual(window.snapshot["selected_realization"], initial)
+        self.assertTrue(window.save_actions["realization"].isEnabled())
+        item = window.realizations.topLevelItem(0)
+        window._realization_selected(item)
+        self.assertGreater(window.inspector.topLevelItemCount(), 0)
+        grid_selection = window.snapshot["selected_realization"]
+        window.power_layout_combo.setCurrentIndex(window.power_layout_combo.findData("compact"))
+        self.assertFalse(window.action_export.isEnabled())
+        self.assertIsNone(window._document)
+        self._wait_until(window, lambda: window._phase() == "realized" and not window._busy and window._document is not None)
+        self.assertNotEqual(window.snapshot["selected_realization"], grid_selection)
+        self.assertTrue(all(item["details"]["power_layout"] == "compact" for item in window.snapshot["realizations"]))
+        window.add_input_combinators_check.setChecked(True)
+        self._wait_until(window, lambda: window._phase() == "realized" and not window._busy and window._document is not None)
+        driver_rows = [window.entities.topLevelItem(index) for index in range(window.entities.topLevelItemCount()) if "constant driver" in window.entities.topLevelItem(index).text(2)]
+        self.assertEqual(len(driver_rows), 2)
+        self.assertTrue(all(row.text(1) == "constant-combinator" for row in driver_rows))
+
+    def test_failed_realization_clears_stale_export_state(self) -> None:
+        window = WorkbenchWindow(target="factorio")
+        self.addCleanup(window.close)
+        window.snapshot = {"phase": "realized", "supports_realization": True, "selected_realization": "old", "artifacts": {"placement": {}, "realization": {}}}
+        with patch.object(window, "_run_worker"):
+            window.realize()
+        self.assertIsNone(window.snapshot["selected_realization"])
+        window._task_failed(RuntimeError("No route"))
+        self.assertFalse(window.action_export.isEnabled())
+        self.assertTrue(window.action_realize.isEnabled())
+
+    def test_chained_factorio_candidate_selection_controls_saved_and_exported_artifact(self) -> None:
+        window = WorkbenchWindow(target="factorio")
+        self.addCleanup(window.close)
+        window.power_layout_combo.setCurrentIndex(window.power_layout_combo.findData("compact"))
+        self._wait_for_operation(window, lambda: window.open_source(FACTORIO_FIXTURE.parent / "chained_add32.v"))
+        window.compile_material()
+        self._wait_until(window, lambda: window._phase() == "materialized" and not window._busy)
+        window.place()
+        self._wait_until(window, lambda: window._document is not None and not window._busy)
+        self.assertEqual(window.realizations.topLevelItemCount(), 2)
+        winner = window.snapshot["realization_winner"]
+        alternative = next(item for item in window.snapshot["realizations"] if item["identifier"] != winner)
+        row = next(window.realizations.topLevelItem(index) for index in range(2) if window.realizations.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole) == alternative["identifier"])
+        window.realizations.setCurrentItem(row)
+        self._wait_until(window, lambda: window._document is not None and not window._busy and window.snapshot["selected_realization"] == alternative["identifier"])
+        self.assertEqual(window.snapshot["realization_winner"], winner)
+        scene = next(view for view in window._document.views if view.identifier == "factorio:finalized").scenes[0]
+        self.assertEqual(sum(item.descriptor.label == "arithmetic-combinator" for item in scene.elements), alternative["details"]["combinators"])
+        with TemporaryDirectory() as directory:
+            saved = Path(directory) / "realization.json"
+            with patch.object(QFileDialog, "getSaveFileName", return_value=(str(saved), "JSON files (*.json)")):
+                self._wait_for_operation(window, lambda: window.save_artifact("realization"))
+            exported = Path(directory) / "blueprint.json"
+            with patch.object(QFileDialog, "getSaveFileName", return_value=(str(exported), "JSON files (*.json)")):
+                self._wait_for_operation(window, window.export_target)
+            artifact = json.loads(saved.read_text())
+            self.assertEqual(artifact["power_layout"], "compact")
+            blueprint = json.loads(exported.read_text())["blueprint"]
+            self.assertEqual(len(artifact["design"]["entities"]), len(blueprint["entities"]))
+            self.assertEqual(sum(item["name"] == "arithmetic-combinator" for item in blueprint["entities"]), alternative["details"]["combinators"])
 
     def test_factorio_export_uses_realization_options(self) -> None:
         worker = Mock()
@@ -195,6 +340,7 @@ class QtWorkbenchTests(unittest.TestCase):
                 "add_input_combinators": True,
                 "input_values": {"a": "0xffffffff", "b": "2"},
                 "add_output_lamps": True,
+                "power_layout": "grid",
             },
         )
 

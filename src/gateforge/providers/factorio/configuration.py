@@ -20,13 +20,13 @@ class FactorioArithmeticConfiguration:
     b_signed: bool
 
     def __post_init__(self) -> None:
-        if self.operation != "add":
+        if self.operation not in {"add", "and", "or", "xor", "not", "multiply", "eq", "ne", "lt", "le", "gt", "ge", "logic_not", "logic_and", "logic_or", "reduce_bool"}:
             raise ValueError(f"Unsupported Factorio arithmetic operation {self.operation!r}")
         for attribute in ("a_width", "b_width", "y_width"):
-            if getattr(self, attribute) != 32:
-                raise ValueError("Factorio arithmetic widths must be 32")
-        if self.a_signed or self.b_signed:
-            raise ValueError("Factorio addition currently requires unsigned operands")
+            if getattr(self, attribute) not in {1, 32}:
+                raise ValueError("Factorio operand widths must be Boolean or 32-bit")
+        if not isinstance(self.a_signed, bool) or not isinstance(self.b_signed, bool):
+            raise ValueError("Factorio operand signedness must be boolean")
 
 
 @dataclass(frozen=True, slots=True)

@@ -149,6 +149,7 @@ class ModulePortSnapshot:
     identifier: str
     direction: PortDirection
     bits: tuple[SourceBit, ...]
+    attributes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +328,7 @@ def _module_from_json(
             identifier=port_name,
             direction=_direction(raw_port.get("direction"), f"{name}.{port_name}"),
             bits=bits,
+            attributes=tuple(sorted(_freeze_strings(data.get("netnames", {}).get(port_name, {}).get("attributes", {})).items())),
         )
         ports[port_name] = port
         for index, bit in enumerate(bits):

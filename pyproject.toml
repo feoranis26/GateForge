@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pyosys==0.68",
+    "z3-solver>=4.13,<5",
 ]
 
 [project.optional-dependencies]

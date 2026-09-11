@@ -27,6 +27,8 @@ class WorkerCommand(StrEnum):
     MATERIALIZE = "materialize"
     RUN_TO_MATERIAL = "run-to-material"
     PLACE = "place"
+    REALIZE = "realize"
+    SELECT_REALIZATION = "select-realization"
     CANDIDATE_DETAILS = "candidate-details"
     RENDER_SCHEMATIC = "render-schematic"
     BUILD_VISUAL_DOCUMENT = "build-visual-document"

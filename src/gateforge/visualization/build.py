@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
+from dataclasses import replace
 
 from gateforge.graph import (
     ConstantSubject,
@@ -59,10 +60,13 @@ def build_visual_document(
     providers: Mapping[str, TargetProvider],
     *,
     provider_options: Mapping[str, Mapping[str, object]] | None = None,
+    realized_views: tuple[VisualView, ...] | None = None,
 ) -> VisualDocument:
     if graph.design != material:
         raise ValueError("Visualization graph does not contain the supplied material")
     views = [_build_material_view(material, graph, placement, providers)]
+    if realized_views is not None:
+        return VisualDocument((*views, *realized_views))
     options = provider_options or {}
     provider_ids = sorted(
         {
@@ -110,6 +114,8 @@ def _build_material_view(
     )
     scenes = []
     for container in placement.containers:
+        extents = [min(prefab.bounds.width, prefab.bounds.height) for prefab in container.prefabs]
+        scale = max(1.0, _TERMINAL_SIZE / min(extents)) if extents and min(extents) > 0 else 1.0
         elements = [
             _material_prefab_element(prefab, object_by_id, providers)
             for prefab in container.prefabs
@@ -123,11 +129,11 @@ def _build_material_view(
             VisualScene(
                 container.path,
                 container.name,
-                _visual_bounds(container.board),
-                tuple(elements),
+                _scaled_bounds(_visual_bounds(container.board), scale),
+                tuple(_scaled_element(element, scale) for element in elements),
                 nets_by_container[container.path],
                 parent=container.parent,
-                grid_size=grid_size,
+                grid_size=grid_size * scale if grid_size is not None else None,
             )
         )
     return VisualView("material", "Material placement", tuple(scenes))
@@ -197,6 +203,8 @@ def _material_prefab_element(
         identifier = _constant_element_id(source.net.value, source.value)
         descriptor = _constant_descriptor(source.value)
         references = (VisualReference("material_net", source.net.value),)
+    if not isinstance(source, ObjectSubject):
+        descriptor = _scaled_descriptor(descriptor, placed.bounds.width / descriptor.bounds.width, placed.bounds.height / descriptor.bounds.height)
     return VisualElement(
         identifier,
         descriptor,
@@ -521,6 +529,34 @@ def _material_attachment_subject(
 
 def _visual_bounds(bounds) -> VisualBounds:
     return VisualBounds(bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y)
+
+
+def _scaled_bounds(bounds: VisualBounds, scale_x: float, scale_y: float | None = None) -> VisualBounds:
+    scale_y = scale_x if scale_y is None else scale_y
+    return VisualBounds(bounds.min_x * scale_x, bounds.min_y * scale_y, bounds.max_x * scale_x, bounds.max_y * scale_y)
+
+
+def _scaled_descriptor(descriptor: VisualElementDescriptor, scale_x: float, scale_y: float) -> VisualElementDescriptor:
+    def point(value):
+        return VisualPoint(value.x * scale_x, value.y * scale_y)
+
+    primitives = []
+    for primitive in descriptor.primitives:
+        if isinstance(primitive, VisualText):
+            primitives.append(replace(primitive, position=point(primitive.position)))
+        else:
+            style = replace(primitive.style, stroke_width=primitive.style.stroke_width * min(scale_x, scale_y))
+            if hasattr(primitive, "bounds"):
+                primitives.append(replace(primitive, bounds=_scaled_bounds(primitive.bounds, scale_x, scale_y), style=style))
+            else:
+                primitives.append(replace(primitive, points=tuple(point(value) for value in primitive.points), style=style))
+    return replace(descriptor, bounds=_scaled_bounds(descriptor.bounds, scale_x, scale_y), primitives=tuple(primitives), ports=tuple(replace(port, position=point(port.position)) for port in descriptor.ports))
+
+
+def _scaled_element(element: VisualElement, scale: float) -> VisualElement:
+    if scale == 1.0:
+        return element
+    return replace(element, descriptor=_scaled_descriptor(element.descriptor, scale, scale), transform=replace(element.transform, x=element.transform.x * scale, y=element.transform.y * scale))
 
 
 def _distributed(count: int, minimum: float, maximum: float) -> tuple[float, ...]:
