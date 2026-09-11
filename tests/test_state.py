@@ -118,8 +118,8 @@ class CompilationStateTests(unittest.TestCase):
             instance="$claim",
             blackbox="gateforge_box",
             ports=(
-                ClaimPortBinding("p0", PrefabPortRef("A"), PortDirection.INPUT),
-                ClaimPortBinding("p1", PrefabPortRef("Y"), PortDirection.OUTPUT),
+                ClaimPortBinding("p0", (PrefabPortRef("A"),), PortDirection.INPUT),
+                ClaimPortBinding("p1", (PrefabPortRef("Y"),), PortDirection.OUTPUT),
             ),
             provider="test",
             mapper="test.mapper",
@@ -138,6 +138,8 @@ class CompilationStateTests(unittest.TestCase):
         for item in legacy["claims"]:
             item.pop("implementation_name")
             item.pop("packaging")
+            for port in item["ports"]:
+                port["target"] = port.pop("targets")[0]
 
         restored = CompilationIntermediateState.from_canonical_data(legacy)
         restored_claim = next(iter(restored.claims.values()))
@@ -154,8 +156,8 @@ class CompilationStateTests(unittest.TestCase):
             instance="$claim",
             blackbox="gateforge_box",
             ports=(
-                ClaimPortBinding("p0", PrefabPortRef("A"), PortDirection.INPUT),
-                ClaimPortBinding("p1", PrefabPortRef("Y"), PortDirection.OUTPUT),
+                ClaimPortBinding("p0", (PrefabPortRef("A"),), PortDirection.INPUT),
+                ClaimPortBinding("p1", (PrefabPortRef("Y"),), PortDirection.OUTPUT),
             ),
             provider="test",
             mapper="test.mapper",
@@ -188,8 +190,8 @@ class CompilationStateTests(unittest.TestCase):
             instance="$claim",
             blackbox="gateforge_box",
             ports=(
-                ClaimPortBinding("p0", PrefabPortRef("A"), PortDirection.INPUT),
-                ClaimPortBinding("p1", PrefabPortRef("Y"), PortDirection.OUTPUT),
+                ClaimPortBinding("p0", (PrefabPortRef("A"),), PortDirection.INPUT),
+                ClaimPortBinding("p1", (PrefabPortRef("Y"),), PortDirection.OUTPUT),
             ),
             provider="test",
             mapper="test.mapper",
@@ -209,6 +211,36 @@ class CompilationStateTests(unittest.TestCase):
         )
 
         self.assertEqual(restored.canonical_data(), state.canonical_data())
+
+    def test_grouped_claim_ports_round_trip_in_bit_order(self) -> None:
+        prefab = _prefab()
+        targets = tuple(PrefabPortRef("A", bit) for bit in range(3))
+        claim = ClaimDefinition(
+            identifier=ClaimDefinitionId("claim"),
+            prefab=prefab.get_id(),
+            module="top",
+            instance="$claim",
+            blackbox="gateforge_box",
+            ports=(ClaimPortBinding("p0", targets, PortDirection.INPUT),),
+            provider="test",
+            mapper="test.mapper",
+            rule="buffer",
+            rule_version=1,
+            accepted_revision=4,
+            source_provenance=("top.source",),
+        )
+        state = CompilationIntermediateState.empty(revision=4).with_acceptance(
+            revision=5,
+            prefabs=[prefab],
+            claims=[claim],
+        )
+
+        restored = CompilationIntermediateState.from_canonical_data(
+            json.loads(json.dumps(state.canonical_data()))
+        )
+
+        restored_claim = next(iter(restored.claims.values()))
+        self.assertEqual(restored_claim.ports[0].targets, targets)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from gateforge.graph import (
     MaterialGraph,
     MaterialSubject,
     ModulePortSubject,
+    ModuleValueSubject,
     ObjectSubject,
 )
 from gateforge.material import (
@@ -15,6 +16,7 @@ from gateforge.material import (
     MaterialConstantRef,
     MaterialDesign,
     MaterialModulePortRef,
+    MaterialModuleValueRef,
     MaterialNetId,
     MaterialObject,
     MaterialObjectPortRef,
@@ -167,6 +169,28 @@ def _material_prefab_element(
             VisualReference(
                 "module_port",
                 f"{source.module}:{source.port}[{source.bit}]",
+            ),
+        )
+    elif isinstance(source, ModuleValueSubject):
+        identifier = _module_value_element_id(
+            source.module,
+            source.port,
+            source.bits,
+            source.direction,
+        )
+        bit_range = (
+            str(source.bits[0])
+            if len(source.bits) == 1
+            else f"{source.bits[-1]}:{source.bits[0]}"
+        )
+        descriptor = _terminal_descriptor(
+            f"{source.port}[{bit_range}]",
+            source.direction,
+        )
+        references = (
+            VisualReference(
+                "module_value",
+                f"{source.module}:{source.port}[{bit_range}]",
             ),
         )
     else:
@@ -483,6 +507,13 @@ def _material_attachment_subject(
             attachment.bit,
             attachment.direction,
         )
+    if isinstance(attachment, MaterialModuleValueRef):
+        return ModuleValueSubject(
+            attachment.module,
+            attachment.port,
+            attachment.bits,
+            attachment.direction,
+        )
     if isinstance(attachment, MaterialConstantRef):
         return ConstantSubject(net, attachment.value)
     raise TypeError(f"Unknown material attachment {attachment!r}")
@@ -640,6 +671,16 @@ def _material_endpoint(net: str, attachment: MaterialAttachment) -> VisualEndpoi
             ),
             "signal",
         )
+    if isinstance(attachment, MaterialModuleValueRef):
+        return VisualEndpoint(
+            _module_value_element_id(
+                attachment.module,
+                attachment.port,
+                attachment.bits,
+                attachment.direction,
+            ),
+            "signal",
+        )
     if isinstance(attachment, MaterialConstantRef):
         return VisualEndpoint(_constant_element_id(net, attachment.value), "signal")
     raise TypeError(f"Unsupported material attachment {attachment!r}")
@@ -652,6 +693,16 @@ def _module_port_element_id(
     direction: PortDirection,
 ) -> str:
     return f"module-port:{module}:{port}:{bit}:{direction.value}"
+
+
+def _module_value_element_id(
+    module: str,
+    port: str,
+    bits: tuple[int, ...],
+    direction: PortDirection,
+) -> str:
+    bit_key = ",".join(str(bit) for bit in bits)
+    return f"module-value:{module}:{port}:{bit_key}:{direction.value}"
 
 
 def _constant_element_id(net: str, value: str) -> str:

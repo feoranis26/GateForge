@@ -44,3 +44,9 @@ module GF_Selector #(
     output [WIDTH-1:0] out
 );
 endmodule
+
+(* blackbox, gateforge_intrinsic = "lamp", gateforge_intrinsic_version = 1 *)
+module GF_Lamp (
+    input [31:0] in
+);
+endmodule

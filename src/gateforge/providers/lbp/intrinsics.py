@@ -280,6 +280,8 @@ class LBPIntrinsicMapper(MappingProvider):
                 instance = DEFAULT_INTRINSICS.recognize(design, cell)
                 if instance is None:
                     continue
+                if instance.definition.kind == IntrinsicKind.LAMP:
+                    continue
                 prefab = _prefab_for(cell, instance.definition.kind)
                 mapper_id = f"lbp.intrinsic.{instance.definition.kind.value}"
                 proposals.append(

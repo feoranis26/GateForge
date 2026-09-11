@@ -39,6 +39,22 @@ class WorkbenchProtocolTests(unittest.TestCase):
 
         self.assertEqual(WorkerEvent.from_json(event.to_json()), event)
 
+    def test_factorio_export_command_round_trips(self) -> None:
+        request = WorkerRequest(
+            "request-factorio",
+            "session-factorio",
+            WorkerCommand.EXPORT_FACTORIO_BLUEPRINT,
+            {
+                "path": "/tmp/blueprint.json",
+                "label": None,
+                "add_input_combinators": False,
+                "input_values": {},
+                "add_output_lamps": True,
+            },
+        )
+
+        self.assertEqual(WorkerRequest.from_json(request.to_json()), request)
+
     def test_rejects_unknown_fields_and_versions(self) -> None:
         data = WorkerRequest(
             request_id="request-1",

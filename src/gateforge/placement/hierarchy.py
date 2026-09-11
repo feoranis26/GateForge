@@ -10,6 +10,7 @@ from gateforge.graph import (
     MaterialGraph,
     MaterialSubject,
     ModulePortSubject,
+    ModuleValueSubject,
     ObjectSubject,
     material_subject_key,
 )
@@ -24,6 +25,7 @@ from gateforge.material import (
     MaterialAttachment,
     MaterialConstantRef,
     MaterialModulePortRef,
+    MaterialModuleValueRef,
     MaterialNetId,
     MaterialObjectId,
     MaterialObjectPortRef,
@@ -119,7 +121,7 @@ def build_placement_hierarchy(
             {
                 subject.module
                 for subject in graph.subjects
-                if isinstance(subject, ModulePortSubject)
+                if isinstance(subject, (ModulePortSubject, ModuleValueSubject))
             }
         )
         root_name = module_names[0] if len(module_names) == 1 else "material"
@@ -184,7 +186,7 @@ def build_placement_hierarchy(
     for subject in graph.subjects:
         if isinstance(subject, ObjectSubject):
             subject_owners[subject] = object_owners[subject.object]
-        elif isinstance(subject, ModulePortSubject):
+        elif isinstance(subject, (ModulePortSubject, ModuleValueSubject)):
             subject_owners[subject] = root
 
     for subject in graph.subjects:
@@ -474,6 +476,13 @@ def _attachment_subject(
             attachment.module,
             attachment.port,
             attachment.bit,
+            attachment.direction,
+        )
+    if isinstance(attachment, MaterialModuleValueRef):
+        return ModuleValueSubject(
+            attachment.module,
+            attachment.port,
+            attachment.bits,
             attachment.direction,
         )
     if isinstance(attachment, MaterialConstantRef):

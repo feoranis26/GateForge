@@ -12,6 +12,7 @@ from gateforge.graph import (
     MaterialGraph,
     MaterialSubject,
     ModulePortSubject,
+    ModuleValueSubject,
     ObjectSubject,
 )
 from gateforge.material import MaterialDesignDigest, MaterialNetId, MaterialObjectId
@@ -1150,6 +1151,28 @@ def _decode_material_subject(value: object) -> MaterialSubject:
                 _require_nonempty_str(data.get("direction"), "subject direction")
             ),
         )
+    if kind == "module_value":
+        _require_keys(
+            data,
+            {"kind", "module", "port", "bits", "direction"},
+            "module-value subject",
+        )
+        bits = tuple(
+            _require_nonnegative_int(item, "subject bit")
+            for item in _require_list(data.get("bits"), "subject bits")
+        )
+        if not bits or bits != tuple(range(len(bits))):
+            raise PlacementError(
+                "Module-value subject bits must be ordered from zero"
+            )
+        return ModuleValueSubject(
+            _require_nonempty_str(data.get("module"), "subject module"),
+            _require_nonempty_str(data.get("port"), "subject port"),
+            bits,
+            PortDirection(
+                _require_nonempty_str(data.get("direction"), "subject direction")
+            ),
+        )
     if kind == "constant":
         _require_keys(data, {"kind", "net", "value"}, "constant subject")
         return ConstantSubject(
@@ -1207,6 +1230,14 @@ def _material_subject_data(item: MaterialSubject) -> dict[str, object]:
             "module": item.module,
             "port": item.port,
             "bit": item.bit,
+            "direction": item.direction.value,
+        }
+    if isinstance(item, ModuleValueSubject):
+        return {
+            "kind": "module_value",
+            "module": item.module,
+            "port": item.port,
+            "bits": list(item.bits),
             "direction": item.direction.value,
         }
     return {"kind": "constant", "net": item.net.value, "value": item.value}

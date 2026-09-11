@@ -98,6 +98,11 @@ class PortDirection(StrEnum):
     INOUT = "inout"
 
 
+class NetworkInterfaceMode(StrEnum):
+    BITWISE = "bitwise"
+    PACKED = "packed"
+
+
 @dataclass(frozen=True, slots=True, order=True)
 class ObjectTypeIdentifier:
     provider: str
@@ -137,6 +142,14 @@ class ObjectTypeSchema:
 class NetworkTypeSchema:
     identifier: NetworkTypeIdentifier
     signal: SignalTypeIdentifier
+    interface_mode: NetworkInterfaceMode = NetworkInterfaceMode.BITWISE
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "interface_mode",
+            NetworkInterfaceMode(self.interface_mode),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,6 +602,34 @@ def validate_prefab(prefab: SemanticPrefab, registry: TargetTypeRegistry) -> Non
                     f"Endpoint {attachment} is attached to more than one net"
                 )
             actual_attachments.add(attachment)
+        if net_schema.interface_mode == NetworkInterfaceMode.PACKED:
+            grouped_bits: dict[tuple[str, str, str], list[int]] = {}
+            grouped_widths: dict[tuple[str, str, str], int] = {}
+            for attachment in net.attachments:
+                if isinstance(attachment, PrefabPortRef):
+                    port = ports[attachment.port]
+                    if not isinstance(port, PrefabPort):
+                        raise AssertionError("Invalid prefab port index")
+                    key = ("external", "", attachment.port)
+                    width = port.width
+                else:
+                    prefab_object = objects[attachment.object_role]
+                    if not isinstance(prefab_object, PrefabObject):
+                        raise AssertionError("Invalid prefab object index")
+                    object_port = _port_by_name(
+                        registry.object(prefab_object.type)
+                    )[attachment.port]
+                    key = ("object", attachment.object_role, attachment.port)
+                    width = object_port.width
+                grouped_bits.setdefault(key, []).append(attachment.bit)
+                grouped_widths[key] = width
+            for key, bits in grouped_bits.items():
+                expected = list(range(grouped_widths[key]))
+                if sorted(bits) != expected:
+                    raise PrefabValidationError(
+                        f"Packed net {net.role!r} must contain the complete "
+                        f"port {key[1] + '.' if key[1] else ''}{key[2]}"
+                    )
 
     missing = expected_attachments - actual_attachments
     if missing:

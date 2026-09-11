@@ -2,7 +2,7 @@ from copy import deepcopy
 from dataclasses import replace
 import unittest
 
-from gateforge.graph import MaterialGraph, ObjectSubject
+from gateforge.graph import MaterialGraph, ModuleValueSubject, ObjectSubject
 from gateforge.material import MaterialDesignDigest
 from gateforge.placement import (
     PhysicalEndpoint,
@@ -16,7 +16,13 @@ from gateforge.placement import (
 )
 from gateforge.providers.lbp.common import LBP_PROVIDER
 from gateforge.providers.lbp.objects import make_lbp_provider
-from tests.test_graph import _lbp_inverter_design
+from gateforge.target import NetworkInterfaceMode
+from tests.test_graph import (
+    ADDITIVE_PROVIDER,
+    _additive_provider,
+    _lbp_inverter_design,
+    _packed_additive_design,
+)
 
 
 class PlacementModelTests(unittest.TestCase):
@@ -51,6 +57,36 @@ class PlacementModelTests(unittest.TestCase):
         self.assertEqual(
             restored.provenance.options.canonical_json,
             '{"mode":"flat","row_pitch":2}',
+        )
+
+    def test_packed_value_subjects_place_and_round_trip(self) -> None:
+        design = _packed_additive_design()
+        provider = _additive_provider(
+            interface_mode=NetworkInterfaceMode.PACKED
+        )
+        graph = MaterialGraph.from_design(
+            design,
+            {ADDITIVE_PROVIDER: provider},
+        )
+        placed = TopologicalPlacer(
+            providers={ADDITIVE_PROVIDER: provider}
+        ).place(graph).finalize(graph)
+
+        restored = PlacedDesign.from_canonical_data(
+            placed.canonical_data(),
+            graph,
+        )
+
+        self.assertEqual(restored, placed)
+        self.assertEqual(
+            len(
+                [
+                    item
+                    for item in placed.prefabs
+                    if isinstance(item.source, ModuleValueSubject)
+                ]
+            ),
+            2,
         )
 
     def test_bounds_are_the_root_physical_board(self) -> None:

@@ -36,7 +36,7 @@ class ClaimApplicationError(ValueError):
 @dataclass(slots=True)
 class _PreparedPort:
     formal: str
-    target: PrefabPortRef
+    targets: tuple[PrefabPortRef, ...]
     direction: PortDirection
     signal: ys.SigSpec
 
@@ -225,20 +225,36 @@ def _prepare_claim(
             )
         cells.append(cell)
 
-    bindings_by_target: dict[PrefabPortRef, BoundaryBinding] = {
-        binding.target: binding for binding in proposal.boundary
-    }
+    bindings_by_port: dict[str, list[BoundaryBinding]] = {}
+    for binding in proposal.boundary:
+        bindings_by_port.setdefault(binding.target.port, []).append(binding)
     prefab_ports = _prefab_ports(proposal.prefab)
     prepared_ports: list[_PreparedPort] = []
-    for index, target in enumerate(sorted(bindings_by_target, key=lambda item: (item.port, item.bit))):
-        binding = bindings_by_target[target]
-        cut = cuts_by_source[binding.source]
+    for index, port_name in enumerate(sorted(bindings_by_port)):
+        bindings = sorted(
+            bindings_by_port[port_name],
+            key=lambda item: item.target.bit,
+        )
+        targets = tuple(binding.target for binding in bindings)
+        expected_bits = tuple(range(prefab_ports[port_name].width))
+        if tuple(target.bit for target in targets) != expected_bits:
+            raise ClaimApplicationError(
+                f"Prefab port {port_name!r} bindings are not ordered and complete"
+            )
+        signal = ys.SigSpec()
+        for binding in bindings:
+            signal.append(
+                context.resolve_cut_source(
+                    snapshot,
+                    cuts_by_source[binding.source],
+                )
+            )
         prepared_ports.append(
             _PreparedPort(
                 formal=f"p{index}",
-                target=target,
-                direction=prefab_ports[target.port].direction,
-                signal=context.resolve_cut_source(snapshot, cut),
+                targets=targets,
+                direction=prefab_ports[port_name].direction,
+                signal=signal,
             )
         )
 
@@ -279,7 +295,7 @@ def _get_or_create_blackbox(
 
     blackbox = context.design.addModule(module_id)
     for index, port in enumerate(prepared.ports):
-        wire = blackbox.addWire(rtlil_id(port.formal), 1)
+        wire = blackbox.addWire(rtlil_id(port.formal), len(port.targets))
         wire.port_id = index + 1
         wire.port_input = port.direction in {PortDirection.INPUT, PortDirection.INOUT}
         wire.port_output = port.direction in {PortDirection.OUTPUT, PortDirection.INOUT}
@@ -347,7 +363,7 @@ def accept_mapping_proposals(
                 ports=tuple(
                     ClaimPortBinding(
                         formal=port.formal,
-                        target=port.target,
+                        targets=port.targets,
                         direction=port.direction,
                     )
                     for port in prepared.ports

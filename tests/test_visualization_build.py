@@ -3,7 +3,7 @@ import unittest
 from gateforge.graph import MaterialGraph
 from gateforge.placement import TopologicalPlacer
 from gateforge.provider import TargetProvider
-from gateforge.target import PortDirection
+from gateforge.target import NetworkInterfaceMode, PortDirection
 from gateforge.visualization import (
     VisualBounds,
     VisualElementDescriptor,
@@ -17,6 +17,7 @@ from tests.test_graph import (
     ADDITIVE_PROVIDER,
     _additive_provider,
     _lbp_inverter_design,
+    _packed_additive_design,
 )
 from gateforge.providers.lbp.common import LBP_PROVIDER
 from gateforge.providers.lbp.objects import make_lbp_provider
@@ -75,6 +76,25 @@ class VisualizationBuildTests(unittest.TestCase):
         provider = _additive_provider()
         self.assertEqual(provider.identifier, ADDITIVE_PROVIDER)
         self.assertIsNone(provider.visualization)
+
+    def test_packed_module_values_render_as_single_terminals(self) -> None:
+        design = _packed_additive_design()
+        provider = _additive_provider(
+            interface_mode=NetworkInterfaceMode.PACKED
+        )
+        providers = {ADDITIVE_PROVIDER: provider}
+        graph = MaterialGraph.from_design(design, providers)
+        placed = TopologicalPlacer(providers=providers).place(graph).finalize(graph)
+
+        document = build_visual_document(design, graph, placed, providers)
+        scene = document.views[0].scenes[0]
+
+        terminal_labels = {
+            item.descriptor.label
+            for item in scene.elements
+            if item.identifier.startswith("module-value:")
+        }
+        self.assertEqual(terminal_labels, {"a[2:0]", "y[2:0]"})
 
 
 if __name__ == "__main__":

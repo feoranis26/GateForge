@@ -9,20 +9,28 @@ from PySide6.QtCore import QEvent, QObject, QRunnable, Qt, QThreadPool, QTimer, 
 from PySide6.QtGui import QAction, QCloseEvent, QFont, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QHeaderView,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QPlainTextEdit,
+    QPushButton,
     QSizePolicy,
     QSpinBox,
     QSplitter,
     QStyle,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTableView,
     QToolBar,
     QToolButton,
@@ -66,6 +74,81 @@ class _WorkerTask(QRunnable):
             self.signals.completed.emit(result)
 
 
+class FactorioInputsDialog(QDialog):
+    def __init__(
+        self,
+        values: Mapping[str, str],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Factorio Input Values")
+        self.resize(460, 320)
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget(0, 2)
+        self.table.setObjectName("factorioInputValuesTable")
+        self.table.setHorizontalHeaderLabels(("Port", "Value"))
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        layout.addWidget(self.table)
+
+        row_actions = QHBoxLayout()
+        add_button = QPushButton("Add")
+        add_button.clicked.connect(self._add_row)
+        remove_button = QPushButton("Remove")
+        remove_button.clicked.connect(self._remove_selected_rows)
+        row_actions.addWidget(add_button)
+        row_actions.addWidget(remove_button)
+        row_actions.addStretch(1)
+        layout.addLayout(row_actions)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        for port, value in sorted(values.items()):
+            self._add_row(port, value)
+
+    def _add_row(self, port: str = "", value: str = "") -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(port))
+        self.table.setItem(row, 1, QTableWidgetItem(value))
+
+    def _remove_selected_rows(self) -> None:
+        rows = sorted(
+            {index.row() for index in self.table.selectedIndexes()},
+            reverse=True,
+        )
+        for row in rows:
+            self.table.removeRow(row)
+
+    def values(self) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for row in range(self.table.rowCount()):
+            port_item = self.table.item(row, 0)
+            value_item = self.table.item(row, 1)
+            port = port_item.text().strip() if port_item is not None else ""
+            value = value_item.text().strip() if value_item is not None else ""
+            if not port or not value:
+                raise ValueError("Each Factorio input row requires a port and value")
+            if port in result:
+                raise ValueError(f"Duplicate Factorio input port {port!r}")
+            result[port] = value
+        return result
+
+    def _accept(self) -> None:
+        try:
+            self.values()
+        except ValueError as error:
+            QMessageBox.warning(self, "Invalid Input Values", str(error))
+            return
+        self.accept()
+
+
 class WorkbenchWindow(QMainWindow):
     snapshot_changed = Signal(object)
     operation_finished = Signal(str)
@@ -74,13 +157,18 @@ class WorkbenchWindow(QMainWindow):
         self,
         source: str | Path | None = None,
         *,
+        target: str = "lbp",
         worker: WorkerClient | None = None,
     ) -> None:
         super().__init__()
+        if target not in {"lbp", "factorio"}:
+            raise ValueError(f"Unknown Workbench target {target!r}")
         self.worker = worker or WorkerClient()
+        self.target = target
         self.source_path: Path | None = None
         self.snapshot: dict[str, object] | None = None
         self._document: VisualDocument | None = None
+        self._factorio_input_values: dict[str, str] = {}
         self._busy = False
         self._continuing = False
         self._generation = 0
@@ -207,7 +295,7 @@ class WorkbenchWindow(QMainWindow):
             self,
         )
         self.action_export.setObjectName("actionExportLbp")
-        self.action_export.triggered.connect(self.export_lbp)
+        self.action_export.triggered.connect(self.export_target)
 
     def _build_ui(self) -> None:
         toolbar = QToolBar("Compiler", self)
@@ -215,6 +303,15 @@ class WorkbenchWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addToolBar(toolbar)
+        toolbar.addWidget(_toolbar_label("Target"))
+        self.target_combo = QComboBox()
+        self.target_combo.setObjectName("targetCombo")
+        self.target_combo.addItem("LittleBigPlanet", "lbp")
+        self.target_combo.addItem("Factorio", "factorio")
+        self.target_combo.setCurrentIndex(self.target_combo.findData(self.target))
+        self.target_combo.currentIndexChanged.connect(self._target_changed)
+        toolbar.addWidget(self.target_combo)
+        toolbar.addSeparator()
         for action in (
             self.action_open,
             self.action_reload,
@@ -298,6 +395,41 @@ class WorkbenchWindow(QMainWindow):
             self.routing_group_height_spin,
             self.routing_gap_rows_spin,
         )
+
+        self.addToolBarBreak()
+        self.factorio_toolbar = QToolBar("Factorio", self)
+        self.factorio_toolbar.setObjectName("factorioToolbar")
+        self.factorio_toolbar.setMovable(False)
+        self.addToolBar(self.factorio_toolbar)
+        self.add_input_combinators_check = QCheckBox("Input combinators")
+        self.add_input_combinators_check.setObjectName("addInputCombinatorsCheck")
+        self.add_input_combinators_check.setToolTip(
+            "Generate constant combinators for top-level inputs"
+        )
+        self.factorio_toolbar.addWidget(self.add_input_combinators_check)
+        self.input_values_button = QToolButton()
+        self.input_values_button.setObjectName("factorioInputValuesButton")
+        self.input_values_button.setText("Input values")
+        self.input_values_button.clicked.connect(self._edit_factorio_inputs)
+        self.factorio_toolbar.addWidget(self.input_values_button)
+        self.add_output_lamps_check = QCheckBox("Output lamps")
+        self.add_output_lamps_check.setObjectName("addOutputLampsCheck")
+        self.add_output_lamps_check.setToolTip(
+            "Generate a lamp for each top-level output"
+        )
+        self.factorio_toolbar.addWidget(self.add_output_lamps_check)
+        self._factorio_controls = (
+            self.add_input_combinators_check,
+            self.input_values_button,
+            self.add_output_lamps_check,
+        )
+        self.add_input_combinators_check.toggled.connect(
+            self._realization_options_changed
+        )
+        self.add_output_lamps_check.toggled.connect(
+            self._realization_options_changed
+        )
+        self._update_factorio_controls()
         self.physical_hierarchy_combo.currentTextChanged.connect(
             lambda _text: self._update_actions()
         )
@@ -416,6 +548,7 @@ class WorkbenchWindow(QMainWindow):
             QToolBar { background: #233833; border: 0; spacing: 5px; padding: 5px; }
             QToolBar QToolButton { color: #f5f2e9; padding: 5px 7px; }
             QToolBar QToolButton:hover { background: #35544b; }
+            QToolBar QCheckBox { color: #f5f2e9; padding: 3px 7px; }
             QToolBar QLabel#toolbarLabel { color: #dfe8e3; padding: 0 3px 0 8px; }
             QToolBar QComboBox, QToolBar QDoubleSpinBox, QToolBar QSpinBox {
                 background: #fbfaf7; color: #202724; border: 1px solid #779087;
@@ -451,13 +584,24 @@ class WorkbenchWindow(QMainWindow):
         self._clear_session_views()
         self._run_worker(
             "Opening source",
-            lambda: self.worker.open_session(path),
+            lambda: self.worker.open_session(path, target=self.target),
             self._accept_snapshot_event,
         )
 
     def reload_source(self) -> None:
         if self.source_path is not None:
             self.open_source(self.source_path)
+
+    def _target_changed(self) -> None:
+        target = self.target_combo.currentData()
+        if not isinstance(target, str) or target == self.target:
+            return
+        self.target = target
+        self._update_factorio_controls()
+        if self.source_path is not None:
+            self.open_source(self.source_path)
+        else:
+            self._update_actions()
 
     def next_stage(self) -> None:
         phase = self._phase()
@@ -586,6 +730,44 @@ class WorkbenchWindow(QMainWindow):
             ),
         )
 
+    def export_target(self) -> None:
+        if self.target == "factorio":
+            self.export_factorio()
+        else:
+            self.export_lbp()
+
+    def export_factorio(self) -> None:
+        if self.source_path is None:
+            return
+        default = self.source_path.with_suffix(".blueprint.json")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Factorio Blueprint",
+            str(default),
+            "JSON files (*.json)",
+        )
+        if not path:
+            return
+        options = self._factorio_realization_options()
+        self._run_worker(
+            "Exporting Factorio blueprint",
+            lambda: self.worker.request(
+                WorkerCommand.EXPORT_FACTORIO_BLUEPRINT,
+                {
+                    "path": path,
+                    "label": self.source_path.stem,
+                    "add_input_combinators": (
+                        options["input_drivers"] == "constant"
+                    ),
+                    "input_values": options["input_values"],
+                    "add_output_lamps": options["output_lamps"],
+                },
+            ),
+            lambda event: self.statusBar().showMessage(
+                f"Exported {_event_payload(event).get('path', path)}"
+            ),
+        )
+
     def closeEvent(self, event: QCloseEvent) -> None:
         self.stop()
         QThreadPool.globalInstance().waitForDone(2000)
@@ -618,11 +800,16 @@ class WorkbenchWindow(QMainWindow):
 
     def _after_placement(self, event: WorkerEvent) -> None:
         self._accept_snapshot_event(event, select_candidate=False)
+        self._build_visual_document()
+
+    def _build_visual_document(self) -> None:
+        if self._phase() not in {"placed", "realized"}:
+            return
         self._run_worker(
             "Building views",
             lambda: self.worker.request(
                 WorkerCommand.BUILD_VISUAL_DOCUMENT,
-                {"provider_options": {}},
+                {"provider_options": self._provider_options_payload()},
             ),
             self._accept_visual_document,
         )
@@ -849,6 +1036,37 @@ class WorkbenchWindow(QMainWindow):
             self._select_frontier_candidate()
 
     def _apply_snapshot(self, snapshot: Mapping[str, object]) -> None:
+        target = snapshot.get("target")
+        if isinstance(target, str) and target in {"lbp", "factorio"}:
+            self.target = target
+            self.target_combo.blockSignals(True)
+            self.target_combo.setCurrentIndex(self.target_combo.findData(target))
+            self.target_combo.blockSignals(False)
+            self._update_factorio_controls()
+        if snapshot.get("phase") == "source-loaded":
+            defaults = _mapping(snapshot.get("placement_defaults"))
+            column_pitch = defaults.get("column_pitch")
+            row_pitch = defaults.get("row_pitch")
+            routing_group_height = defaults.get("routing_group_height")
+            routing_gap_rows = defaults.get("routing_gap_rows")
+            if isinstance(column_pitch, (int, float)) and not isinstance(
+                column_pitch, bool
+            ):
+                self.column_pitch_spin.setValue(float(column_pitch))
+            if isinstance(row_pitch, (int, float)) and not isinstance(
+                row_pitch, bool
+            ):
+                self.row_pitch_spin.setValue(float(row_pitch))
+            if isinstance(routing_group_height, (int, float)) and not isinstance(
+                routing_group_height, bool
+            ):
+                self.routing_group_height_spin.setValue(
+                    float(routing_group_height)
+                )
+            if isinstance(routing_gap_rows, int) and not isinstance(
+                routing_gap_rows, bool
+            ):
+                self.routing_gap_rows_spin.setValue(routing_gap_rows)
         self.snapshot = dict(snapshot)
         phase = self._phase()
         self.phase_label.setText(phase.replace("-", " ").title())
@@ -981,6 +1199,12 @@ class WorkbenchWindow(QMainWindow):
         has_source = self.source_path is not None and self.snapshot is not None
         phase = self._phase()
         artifacts = _mapping((self.snapshot or {}).get("artifacts"))
+        self.target_combo.setEnabled(not self._busy)
+        for control in self._factorio_controls:
+            control.setEnabled(not self._busy)
+        self.input_values_button.setEnabled(
+            not self._busy and self.add_input_combinators_check.isChecked()
+        )
         self.action_reload.setEnabled(self.source_path is not None and not self._busy)
         self.action_next.setEnabled(has_source and self._can_advance() and not self._busy)
         self.action_continue.setEnabled(
@@ -1024,6 +1248,43 @@ class WorkbenchWindow(QMainWindow):
         self.action_export.setEnabled(
             isinstance(artifacts.get("placement"), Mapping) and not self._busy
         )
+
+    def _edit_factorio_inputs(self) -> None:
+        dialog = FactorioInputsDialog(self._factorio_input_values, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            values = dialog.values()
+            if values != self._factorio_input_values:
+                self._factorio_input_values = values
+                self._realization_options_changed()
+
+    def _realization_options_changed(self, _checked: bool = False) -> None:
+        self._update_actions()
+        if self.target == "factorio" and self._phase() == "realized":
+            self._build_visual_document()
+
+    def _update_factorio_controls(self) -> None:
+        is_factorio = self.target == "factorio"
+        self.factorio_toolbar.setVisible(is_factorio)
+        self.action_export.setText(
+            "Export Blueprint" if is_factorio else "Export LBP"
+        )
+
+    def _factorio_realization_options(self) -> dict[str, object]:
+        add_input_combinators = self.add_input_combinators_check.isChecked()
+        return {
+            "input_drivers": "constant" if add_input_combinators else "none",
+            "input_values": (
+                dict(self._factorio_input_values)
+                if add_input_combinators
+                else {}
+            ),
+            "output_lamps": self.add_output_lamps_check.isChecked(),
+        }
+
+    def _provider_options_payload(self) -> dict[str, dict[str, object]]:
+        if self.target != "factorio":
+            return {}
+        return {"factorio": self._factorio_realization_options()}
 
     def _clear_session_views(self) -> None:
         self.pipeline.clear()
@@ -1112,14 +1373,18 @@ def _sequence(value: object) -> Sequence[object]:
     return value if isinstance(value, Sequence) and not isinstance(value, str) else ()
 
 
-def launch_workbench(source: str | Path | None = None) -> int:
+def launch_workbench(
+    source: str | Path | None = None,
+    *,
+    target: str = "lbp",
+) -> int:
     application = QApplication.instance()
     owns_application = application is None
     if application is None:
         application = QApplication(sys.argv[:1])
     application.setApplicationName("GateForge Workbench")
     application.setOrganizationName("GateForge")
-    window = WorkbenchWindow(source)
+    window = WorkbenchWindow(source, target=target)
     window.show()
     if not owns_application:
         return 0
@@ -1132,5 +1397,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Open the GateForge compiler workbench.",
     )
     parser.add_argument("source", nargs="?", type=Path)
+    parser.add_argument(
+        "--target",
+        choices=("lbp", "factorio"),
+        default="lbp",
+        help="Select the compilation target.",
+    )
     args = parser.parse_args(argv)
-    return launch_workbench(args.source)
+    return launch_workbench(args.source, target=args.target)

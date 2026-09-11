@@ -2,6 +2,7 @@ from dataclasses import replace
 import unittest
 
 from gateforge.target import (
+    NetworkInterfaceMode,
     NetworkTypeIdentifier,
     NetworkTypeSchema,
     ObjectPortRef,
@@ -183,6 +184,71 @@ class SemanticPrefabTests(unittest.TestCase):
 
     def test_validates_multi_object_prefab(self) -> None:
         validate_prefab(_andnot_prefab(), _registry())
+
+    def test_packed_net_requires_complete_port_values(self) -> None:
+        packed_wire = NetworkTypeIdentifier(PROVIDER, "packed")
+        registry = _registry()
+        registry.register_network(
+            NetworkTypeSchema(
+                packed_wire,
+                BIT,
+                NetworkInterfaceMode.PACKED,
+            )
+        )
+        prefab = SemanticPrefab(
+            provider=PROVIDER,
+            objects=frozenset({PrefabObject("invert", NOT)}),
+            ports=frozenset(
+                {
+                    PrefabPort("A", PortDirection.INPUT, BIT, width=3),
+                    PrefabPort("Y", PortDirection.OUTPUT, BIT),
+                }
+            ),
+            nets=frozenset(
+                {
+                    PrefabNet(
+                        "value",
+                        packed_wire,
+                        frozenset(
+                            {
+                                PrefabPortRef("A", 0),
+                                PrefabPortRef("A", 1),
+                                PrefabPortRef("A", 2),
+                                ObjectPortRef("invert", "A"),
+                            }
+                        ),
+                    ),
+                    PrefabNet(
+                        "output",
+                        WIRE,
+                        frozenset(
+                            {
+                                ObjectPortRef("invert", "Y"),
+                                PrefabPortRef("Y"),
+                            }
+                        ),
+                    ),
+                }
+            ),
+        )
+        value_net = next(net for net in prefab.nets if net.role == "value")
+        valid = prefab
+
+        validate_prefab(valid, registry)
+
+        incomplete = replace(
+            valid,
+            nets=(valid.nets - {value_net})
+            | {
+                replace(
+                    value_net,
+                    attachments=value_net.attachments
+                    - {PrefabPortRef("A", 2)},
+                )
+            },
+        )
+        with self.assertRaisesRegex(PrefabValidationError, "complete port A"):
+            validate_prefab(incomplete, registry)
 
 
 if __name__ == "__main__":

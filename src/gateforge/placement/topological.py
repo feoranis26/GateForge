@@ -11,6 +11,7 @@ from gateforge.graph import (
     MaterialGraph,
     MaterialSubject,
     ModulePortSubject,
+    ModuleValueSubject,
     ObjectSubject,
     material_subject_key,
 )
@@ -482,11 +483,17 @@ def _assign_columns(
             continue
         if isinstance(subject, ConstantSubject):
             left_terminals.append(subject)
-        elif isinstance(subject, (ModulePortSubject, BoundaryPortSubject)) and (
+        elif isinstance(
+            subject,
+            (ModulePortSubject, ModuleValueSubject, BoundaryPortSubject),
+        ) and (
             subject.direction == PortDirection.INPUT
         ):
             left_terminals.append(subject)
-        elif isinstance(subject, (ModulePortSubject, BoundaryPortSubject)) and (
+        elif isinstance(
+            subject,
+            (ModulePortSubject, ModuleValueSubject, BoundaryPortSubject),
+        ) and (
             subject.direction == PortDirection.OUTPUT
         ):
             right_terminals.append(subject)
@@ -917,6 +924,12 @@ def _generic_component_id(subject: MaterialSubject) -> str:
             f"module:{subject.module}:{subject.port}:{subject.bit}:"
             f"{subject.direction.value}"
         )
+    if isinstance(subject, ModuleValueSubject):
+        return (
+            f"module-value:{subject.module}:{subject.port}:"
+            f"{','.join(str(bit) for bit in subject.bits)}:"
+            f"{subject.direction.value}"
+        )
     return f"constant:{subject.net.value}:{subject.value}"
 
 
@@ -925,6 +938,8 @@ def _generic_component_kind(subject: MaterialSubject) -> str:
         return "material_object"
     if isinstance(subject, ModulePortSubject):
         return "module_port"
+    if isinstance(subject, ModuleValueSubject):
+        return "module_value"
     return "constant"
 
 

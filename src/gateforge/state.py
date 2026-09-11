@@ -9,7 +9,7 @@ from gateforge.material import ImplementationPackaging
 from gateforge.target import PortDirection, PrefabId, PrefabPortRef, SemanticPrefab
 
 
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -20,8 +20,19 @@ class ClaimDefinitionId:
 @dataclass(frozen=True, slots=True)
 class ClaimPortBinding:
     formal: str
-    target: PrefabPortRef
+    targets: tuple[PrefabPortRef, ...]
     direction: PortDirection
+
+    def __post_init__(self) -> None:
+        if not self.targets:
+            raise ValueError("Claim port binding requires a target")
+        if len(set(self.targets)) != len(self.targets):
+            raise ValueError("Claim port binding targets must be unique")
+        if len({target.port for target in self.targets}) != 1:
+            raise ValueError("Claim port binding targets must share one prefab port")
+        bits = tuple(target.bit for target in self.targets)
+        if bits != tuple(sorted(bits)):
+            raise ValueError("Claim port binding targets must be ordered by bit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,10 +135,13 @@ class CompilationIntermediateState:
                     "ports": [
                         {
                             "formal": port.formal,
-                            "target": {
-                                "port": port.target.port,
-                                "bit": port.target.bit,
-                            },
+                            "targets": [
+                                {
+                                    "port": target.port,
+                                    "bit": target.bit,
+                                }
+                                for target in port.targets
+                            ],
                             "direction": port.direction.value,
                         }
                         for port in claim.ports
@@ -164,7 +178,7 @@ class CompilationIntermediateState:
         value: Mapping[str, Any],
     ) -> "CompilationIntermediateState":
         version = value.get("schema_version")
-        if version not in {1, STATE_SCHEMA_VERSION}:
+        if version not in {1, 2, STATE_SCHEMA_VERSION}:
             raise ValueError(f"Unsupported state schema version {version!r}")
         revision = value.get("revision")
         if not isinstance(revision, int) or isinstance(revision, bool):
@@ -207,19 +221,30 @@ class CompilationIntermediateState:
             for raw_port in raw_ports:
                 if not isinstance(raw_port, Mapping):
                     raise ValueError("State claim port must be an object")
-                target = raw_port.get("target")
-                if not isinstance(target, Mapping):
-                    raise ValueError("State claim target must be an object")
-                bit = target.get("bit")
-                if not isinstance(bit, int) or isinstance(bit, bool):
-                    raise ValueError("State claim target bit must be an integer")
+                raw_targets = (
+                    raw_port.get("targets")
+                    if version == STATE_SCHEMA_VERSION
+                    else [raw_port.get("target")]
+                )
+                if not isinstance(raw_targets, list) or not raw_targets:
+                    raise ValueError("State claim targets must be a non-empty list")
+                targets: list[PrefabPortRef] = []
+                for raw_target in raw_targets:
+                    if not isinstance(raw_target, Mapping):
+                        raise ValueError("State claim target must be an object")
+                    bit = raw_target.get("bit")
+                    if not isinstance(bit, int) or isinstance(bit, bool):
+                        raise ValueError("State claim target bit must be an integer")
+                    targets.append(
+                        PrefabPortRef(
+                            _required_string(raw_target, "port"),
+                            bit,
+                        )
+                    )
                 ports.append(
                     ClaimPortBinding(
                         formal=_required_string(raw_port, "formal"),
-                        target=PrefabPortRef(
-                            _required_string(target, "port"),
-                            bit,
-                        ),
+                        targets=tuple(targets),
                         direction=PortDirection(
                             _required_string(raw_port, "direction")
                         ),

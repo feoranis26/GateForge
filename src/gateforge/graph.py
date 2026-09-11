@@ -9,6 +9,7 @@ from gateforge.material import (
     MaterialConstantRef,
     MaterialDesign,
     MaterialModulePortRef,
+    MaterialModuleValueRef,
     MaterialNetId,
     MaterialObjectId,
     MaterialObjectPortRef,
@@ -36,12 +37,22 @@ class ModulePortSubject:
 
 
 @dataclass(frozen=True, slots=True)
+class ModuleValueSubject:
+    module: str
+    port: str
+    bits: tuple[int, ...]
+    direction: PortDirection
+
+
+@dataclass(frozen=True, slots=True)
 class ConstantSubject:
     net: MaterialNetId
     value: str
 
 
-type MaterialSubject = ObjectSubject | ModulePortSubject | ConstantSubject
+type MaterialSubject = (
+    ObjectSubject | ModulePortSubject | ModuleValueSubject | ConstantSubject
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +182,15 @@ def material_subject_key(subject: MaterialSubject) -> tuple[object, ...]:
             subject.bit,
             subject.direction.value,
         )
-    return (2, subject.object.value)
+    if isinstance(subject, ObjectSubject):
+        return (2, subject.object.value)
+    return (
+        3,
+        subject.module,
+        subject.port,
+        subject.bits,
+        subject.direction.value,
+    )
 
 
 def _attachment_subject(
@@ -185,6 +204,13 @@ def _attachment_subject(
             attachment.module,
             attachment.port,
             attachment.bit,
+            attachment.direction,
+        )
+    if isinstance(attachment, MaterialModuleValueRef):
+        return ModuleValueSubject(
+            attachment.module,
+            attachment.port,
+            attachment.bits,
             attachment.direction,
         )
     if isinstance(attachment, MaterialConstantRef):
@@ -203,4 +229,12 @@ def _attachment_key(attachment: MaterialAttachment) -> tuple[object, ...]:
             attachment.bit,
             attachment.direction.value,
         )
-    return (2, attachment.value)
+    if isinstance(attachment, MaterialConstantRef):
+        return (2, attachment.value)
+    return (
+        3,
+        attachment.module,
+        attachment.port,
+        attachment.bits,
+        attachment.direction.value,
+    )

@@ -3,19 +3,22 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtCore import QEventLoop, QTimer, Qt
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QFileDialog
 except ModuleNotFoundError as error:
     raise unittest.SkipTest("PySide6 workbench extra is not installed") from error
 
-from gateforge.workbench.qt_app import WorkbenchWindow
+from gateforge.workbench.qt_app import FactorioInputsDialog, WorkbenchWindow
+from gateforge.workbench.protocol import WorkerCommand
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "single_not.v"
+FACTORIO_FIXTURE = Path(__file__).parent / "fixtures" / "factorio" / "add32.v"
 
 
 class QtWorkbenchTests(unittest.TestCase):
@@ -103,6 +106,97 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertEqual(window.column_pitch_spin.value(), 315.0)
         window.physical_hierarchy_combo.setCurrentText("preserve-all")
         self.assertFalse(window.hierarchy_threshold_spin.isEnabled())
+
+    def test_factorio_target_opens_with_backend_placement_defaults(self) -> None:
+        window = WorkbenchWindow(target="factorio")
+        self.addCleanup(window.close)
+
+        self.assertEqual(window.target_combo.currentData(), "factorio")
+        self._wait_for_operation(
+            window,
+            lambda: window.open_source(FACTORIO_FIXTURE),
+        )
+
+        self.assertEqual(window.snapshot["target"], "factorio")
+        self.assertEqual(window.column_pitch_spin.value(), 6.0)
+        self.assertEqual(window.row_pitch_spin.value(), 3.0)
+        self.assertEqual(window.routing_group_height_spin.value(), 8.0)
+        self.assertEqual(window.routing_gap_rows_spin.value(), 1)
+
+    def test_factorio_realization_controls_build_one_provider_payload(self) -> None:
+        window = WorkbenchWindow(target="factorio")
+        self.addCleanup(window.close)
+        window.add_input_combinators_check.setChecked(True)
+        window.add_output_lamps_check.setChecked(True)
+        window._factorio_input_values = {"a": "0xffffffff", "b": "2"}
+
+        self.assertFalse(window.factorio_toolbar.isHidden())
+        self.assertEqual(
+            window._provider_options_payload(),
+            {
+                "factorio": {
+                    "input_drivers": "constant",
+                    "input_values": {"a": "0xffffffff", "b": "2"},
+                    "output_lamps": True,
+                }
+            },
+        )
+
+        window.target_combo.setCurrentIndex(window.target_combo.findData("lbp"))
+        self.assertTrue(window.factorio_toolbar.isHidden())
+        self.assertEqual(window._provider_options_payload(), {})
+
+    def test_factorio_inputs_dialog_rejects_duplicate_ports(self) -> None:
+        dialog = FactorioInputsDialog({"a": "1"})
+        self.addCleanup(dialog.close)
+        dialog._add_row("a", "2")
+
+        with self.assertRaisesRegex(ValueError, "Duplicate.*a"):
+            dialog.values()
+
+    def test_factorio_option_change_rebuilds_realized_views(self) -> None:
+        window = WorkbenchWindow(target="factorio")
+        self.addCleanup(window.close)
+        window.snapshot = {"phase": "realized", "artifacts": {}}
+
+        with patch.object(window, "_build_visual_document") as rebuild:
+            window.add_output_lamps_check.setChecked(True)
+
+        rebuild.assert_called_once_with()
+
+    def test_factorio_export_uses_realization_options(self) -> None:
+        worker = Mock()
+        worker.alive = False
+        window = WorkbenchWindow(target="factorio", worker=worker)
+        self.addCleanup(window.close)
+        window.source_path = FACTORIO_FIXTURE
+        window.add_input_combinators_check.setChecked(True)
+        window.add_output_lamps_check.setChecked(True)
+        window._factorio_input_values = {"a": "0xffffffff", "b": "2"}
+        output = "/tmp/add32.blueprint.json"
+
+        with (
+            patch.object(
+                QFileDialog,
+                "getSaveFileName",
+                return_value=(output, "JSON files (*.json)"),
+            ),
+            patch.object(window, "_run_worker") as run_worker,
+        ):
+            window.export_target()
+
+        operation = run_worker.call_args.args[1]
+        operation()
+        worker.request.assert_called_once_with(
+            WorkerCommand.EXPORT_FACTORIO_BLUEPRINT,
+            {
+                "path": output,
+                "label": "add32",
+                "add_input_combinators": True,
+                "input_values": {"a": "0xffffffff", "b": "2"},
+                "add_output_lamps": True,
+            },
+        )
 
     def test_complete_workbench_flow_builds_schematic_and_realized_views(self) -> None:
         window = WorkbenchWindow()

@@ -4,7 +4,7 @@ GateForge is a compiler for turning synthesizable Verilog into logic built from 
 
 It uses Yosys as its Verilog frontend and provides a target-provider architecture for mapping synthesized logic onto platform-specific objects, placement rules, and export formats.
 
-The first and currently implemented target is **LittleBigPlanet 3**, where GateForge can compile Verilog into LBP logic gadgets, automatically place them on circuit boards and microchips, and export the result as Craftworld Toolkit-compatible PLAN JSON.
+GateForge currently targets **LittleBigPlanet 3** and **Factorio 2.0**. GateForge can compile Verilog into native target objects, place and visualize them, and export either Craftworld Toolkit-compatible PLAN JSON or direct Factorio blueprint JSON.
 
 ```text
 Verilog source --->
@@ -42,7 +42,23 @@ Live export / loading in game:              NO
 Native .PLAN output:                        NO
 ```
 
-GateForge currently includes only the LBP target provider. The compiler is structured to support additional targets without making LBP-specific objects part of the compiler's common representation.
+```text
+The Factorio backend currently supports:
+Native 32-bit addition:                     YES
+Native output-lamp intrinsic:               YES
+Automatic tile-aware placement:             YES
+Red/green circuit routing:                  YES
+Explicit copper power links:                YES
+Generated input constant combinators:       YES
+Generated output lamps:                     YES
+Factorio 2.0 blueprint JSON export:         YES
+
+General synthesized logic mapping:          NO
+Blueprint import:                           NO
+Encoded blueprint strings:                  NO
+```
+
+The compiler keeps target-specific objects outside its common representation so additional providers do not make LBP or Factorio concepts universal compiler primitives.
 
 ## Requirements
 
@@ -81,7 +97,13 @@ Open a Verilog source file with:
 uv run --extra workbench gateforge workbench design.v
 ```
 
-The Workbench exposes several intermediate compiler stages and is useful both for normal LBP compilation and for debugging mappings and placement.
+LBP is selected by default. Open a Factorio session with:
+
+```bash
+uv run --extra workbench gateforge workbench --target factorio design.v
+```
+
+The Workbench exposes intermediate compiler stages, target placement defaults, provider-realized views, and target-aware export. Factorio sessions also expose generated input combinators, per-port input values, and generated output lamps. The interactive viewer and Workbench use Qt through PySide6.
 
 ## Command-line usage
 
@@ -111,6 +133,37 @@ uv run gateforge export lbp-toolkit \
 The resulting object can then be added to an LBP profile using Craftworld Toolkit.
 
 **Back up the profile before modifying it. Do not modify an active profile while LittleBigPlanet is running.** The game may retain cached profile data and overwrite or desynchronize external changes.
+
+### Export to Factorio
+
+Compile and place a Factorio design, then export direct Factorio 2.0 blueprint JSON:
+
+```bash
+uv run gateforge compile add32.v \
+    --target factorio \
+    --emit-material build/add32.material.json \
+    --emit-placement build/add32.placement.json
+
+uv run gateforge export factorio-blueprint \
+    build/add32.material.json \
+    build/add32.placement.json \
+    --output build/add32.blueprint.json \
+    --label "GateForge add32" \
+    --add-input-combinators \
+    --input-value a=0xffffffff \
+    --input-value b=2 \
+    --add-output-lamps
+```
+
+The Factorio-only `GF_Lamp` intrinsic connects one packed 32-bit input to a native small lamp:
+
+```verilog
+GF_Lamp result_lamp (
+    .in(result)
+);
+```
+
+Its circuit condition is fixed to the assigned virtual signal `> 0`. **Values use signed 32-bit Factorio signal semantics**, so `32'hffffffff` is `-1` and does not light the lamp.
 
 ### Visualize a placed design
 
@@ -284,7 +337,7 @@ GateForge can expose several intermediate representations for debugging and tool
 --emit-search-report
 ```
 
-For normal use, only the material and placement files are needed for the current LBP export workflow.
+For normal use, only the material and placement files are needed for either target export workflow.
 
 The other artifacts are primarily intended for compiler development, debugging, and external tooling.
 
@@ -304,8 +357,6 @@ A provider defines the objects available on a target and the operations required
 * target-specific export
 
 The rest of GateForge operates on common compiler representations so that target-specific concepts do not need to be hard-coded throughout the compiler.
-
-At present, the repository includes only the LittleBigPlanet provider. Future planned targets include Factorio and Minecraft, among others.
 
 ## Development
 

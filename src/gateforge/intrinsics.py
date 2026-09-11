@@ -27,6 +27,7 @@ class IntrinsicKind(StrEnum):
     COUNTER = "counter"
     RANDOMIZER = "randomizer"
     SELECTOR = "selector"
+    LAMP = "lamp"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +145,12 @@ DEFAULT_INTRINSICS = IntrinsicRegistry(
                 IntrinsicPort("in", PortDirection.INPUT),
                 IntrinsicPort("out", PortDirection.OUTPUT),
             ),
+        ),
+        IntrinsicDefinition(
+            module="GF_Lamp",
+            kind=IntrinsicKind.LAMP,
+            version=1,
+            ports=(IntrinsicPort("in", PortDirection.INPUT),),
         ),
     )
 )

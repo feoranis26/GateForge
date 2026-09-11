@@ -32,6 +32,7 @@ class WorkerCommand(StrEnum):
     BUILD_VISUAL_DOCUMENT = "build-visual-document"
     SAVE_ARTIFACT = "save-artifact"
     EXPORT_LBP_TOOLKIT = "export-lbp-toolkit"
+    EXPORT_FACTORIO_BLUEPRINT = "export-factorio-blueprint"
     SHUTDOWN = "shutdown"
 
 

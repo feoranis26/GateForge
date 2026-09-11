@@ -9,6 +9,8 @@ from gateforge.material import (
     MaterialImplementationPort,
     MaterialModuleOccurrence,
     MaterialModulePortRef,
+    MaterialModuleValueRef,
+    MaterialConstantRef,
     MaterialNet,
     MaterialNetId,
     MaterialObject,
@@ -24,7 +26,37 @@ from gateforge.providers.lbp.common import LBP_PROVIDER, LBP_WIRE
 from gateforge.providers.lbp.objects import make_lbp_provider
 from gateforge.providers.lbp.types import LBPNotGateType
 from gateforge.provider import TargetProvider
-from gateforge.target import PortDirection, PrefabId, ProviderConfiguration
+from gateforge.target import (
+    NetworkInterfaceMode,
+    NetworkTypeIdentifier,
+    NetworkTypeSchema,
+    PortDirection,
+    PrefabId,
+    ProviderConfiguration,
+    SignalTypeIdentifier,
+    TargetTypeRegistry,
+)
+
+
+PACKED_PROVIDER = "packed-test"
+PACKED_SIGNAL = SignalTypeIdentifier(PACKED_PROVIDER, "value")
+PACKED_WIRE = NetworkTypeIdentifier(PACKED_PROVIDER, "wire")
+
+
+def _packed_provider() -> TargetProvider:
+    registry = TargetTypeRegistry()
+    registry.register_network(
+        NetworkTypeSchema(
+            PACKED_WIRE,
+            PACKED_SIGNAL,
+            NetworkInterfaceMode.PACKED,
+        )
+    )
+    return TargetProvider(
+        identifier=PACKED_PROVIDER,
+        registry=registry,
+        validator=lambda prefab, registry: None,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +247,73 @@ class MaterialDesignTests(unittest.TestCase):
         restored = MaterialDesign.from_canonical_data(legacy, self.providers)
 
         self.assertEqual(restored, self.design)
+
+    def test_packed_module_value_round_trips_in_bit_order(self) -> None:
+        attachments = frozenset(
+            {
+                MaterialModuleValueRef(
+                    "test",
+                    "a",
+                    (0, 1, 2),
+                    PortDirection.INPUT,
+                ),
+                MaterialConstantRef("0"),
+            }
+        )
+        design = MaterialDesign(
+            (),
+            (
+                MaterialNet(
+                    make_material_net_id(PACKED_WIRE, attachments),
+                    PACKED_WIRE,
+                    attachments,
+                ),
+            ),
+        )
+
+        restored = MaterialDesign.from_canonical_data(
+            design.canonical_data(),
+            {PACKED_PROVIDER: _packed_provider()},
+        )
+
+        self.assertEqual(restored, design)
+        value = next(
+            attachment
+            for attachment in restored.nets[0].attachments
+            if isinstance(attachment, MaterialModuleValueRef)
+        )
+        self.assertEqual(value.bits, (0, 1, 2))
+
+    def test_schema_two_rejects_packed_module_value(self) -> None:
+        attachments = frozenset(
+            {
+                MaterialModuleValueRef(
+                    "test",
+                    "a",
+                    (0, 1),
+                    PortDirection.INPUT,
+                ),
+                MaterialConstantRef("0"),
+            }
+        )
+        design = MaterialDesign(
+            (),
+            (
+                MaterialNet(
+                    make_material_net_id(PACKED_WIRE, attachments),
+                    PACKED_WIRE,
+                    attachments,
+                ),
+            ),
+        )
+        data = design.canonical_data()
+        data["schema_version"] = 2
+
+        with self.assertRaisesRegex(MaterialValidationError, "schema version 3"):
+            MaterialDesign.from_canonical_data(
+                data,
+                {PACKED_PROVIDER: _packed_provider()},
+            )
 
     def test_decoder_normalizes_array_order(self) -> None:
         data = self.design.canonical_data()

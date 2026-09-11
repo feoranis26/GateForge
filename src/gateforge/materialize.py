@@ -12,6 +12,7 @@ from gateforge.material import (
     MaterialConstantRef,
     MaterialDesign,
     MaterialModulePortRef,
+    MaterialModuleValueRef,
     MaterialModuleOccurrence,
     MaterialModulePort,
     MaterialNetId,
@@ -28,6 +29,7 @@ from gateforge.provider import TargetProvider
 from gateforge.source import ConstantBit, ModulePortIdentifier, SnapshotBitRef
 from gateforge.state import ClaimDefinitionId, CompilationIntermediateState
 from gateforge.target import (
+    NetworkInterfaceMode,
     NetworkTypeIdentifier,
     ObjectPortRef,
     PortDirection,
@@ -38,6 +40,56 @@ from gateforge.target import (
 
 class MaterializationError(ValueError):
     pass
+
+
+def _module_boundary_attachments(
+    network_type: NetworkTypeIdentifier,
+    ports: set[MaterialModulePortRef],
+    snapshot,
+    providers: Mapping[str, TargetProvider],
+) -> set[MaterialModulePortRef | MaterialModuleValueRef]:
+    try:
+        network_schema = providers[network_type.provider].registry.network(
+            network_type
+        )
+    except KeyError as error:
+        raise MaterializationError(
+            f"No provider is registered for material network {network_type}"
+        ) from error
+    if network_schema.interface_mode == NetworkInterfaceMode.BITWISE:
+        return set(ports)
+
+    grouped: dict[
+        tuple[str, str, PortDirection], list[MaterialModulePortRef]
+    ] = defaultdict(list)
+    for port in ports:
+        grouped[(port.module, port.port, port.direction)].append(port)
+
+    attachments: set[MaterialModulePortRef | MaterialModuleValueRef] = set()
+    for (module_name, port_name, direction), references in grouped.items():
+        try:
+            width = len(snapshot.module(module_name).ports[port_name].bits)
+        except KeyError as error:
+            raise MaterializationError(
+                f"Packed material network references unknown module port "
+                f"{module_name}.{port_name}"
+            ) from error
+        bits = tuple(sorted(reference.bit for reference in references))
+        if bits != tuple(range(width)):
+            raise MaterializationError(
+                f"Packed material network contains incomplete module port "
+                f"{module_name}.{port_name}; got bits {bits!r}, expected "
+                f"{tuple(range(width))!r}"
+            )
+        attachments.add(
+            MaterialModuleValueRef(
+                module_name,
+                port_name,
+                bits,
+                direction,
+            )
+        )
+    return attachments
 
 
 type _SignalOccurrence = tuple[str, SnapshotBitRef]
@@ -229,19 +281,24 @@ def materialize(
                         f"Claim occurrence {cell.identifier.name} has no formal port "
                         f"{port_binding.formal}"
                     ) from error
-                if len(cell_port.bits) != 1:
+                if len(cell_port.bits) != len(port_binding.targets):
                     raise MaterializationError(
                         f"Claim formal {cell.identifier.name}.{port_binding.formal} "
-                        f"has width {len(cell_port.bits)}"
+                        f"has width {len(cell_port.bits)}, expected "
+                        f"{len(port_binding.targets)}"
                     )
-                local_key = external_to_local[(occurrence, port_binding.target)]
-                source = cell_port.bits[0]
-                if isinstance(source, SnapshotBitRef):
-                    signal_to_local[source].append(local_key)
-                elif isinstance(source, ConstantBit):
-                    local_constants[local_key].add(
-                        MaterialConstantRef(source.value.value)
-                    )
+                for target, source in zip(
+                    port_binding.targets,
+                    cell_port.bits,
+                    strict=True,
+                ):
+                    local_key = external_to_local[(occurrence, target)]
+                    if isinstance(source, SnapshotBitRef):
+                        signal_to_local[source].append(local_key)
+                    elif isinstance(source, ConstantBit):
+                        local_constants[local_key].add(
+                            MaterialConstantRef(source.value.value)
+                        )
 
     for local_keys in signal_to_local.values():
         first = local_keys[0]
@@ -279,7 +336,14 @@ def materialize(
                 f"Material network joins incompatible types {network_types!r}"
             )
         network_type = next(iter(network_types))
-        attachments: set[MaterialAttachment] = set(root_module_ports[root])
+        attachments: set[MaterialAttachment] = set(
+            _module_boundary_attachments(
+                network_type,
+                root_module_ports[root],
+                snapshot,
+                providers,
+            )
+        )
         for local_key in local_keys:
             attachments.update(local_attachments[local_key])
             attachments.update(local_constants[local_key])
@@ -447,23 +511,34 @@ def materialize_hierarchy(
                 for binding in claim.ports:
                     try:
                         cell_port = cell.ports[binding.formal]
-                        local_key = external_to_local[binding.target]
                     except KeyError as error:
                         raise MaterializationError(
                             f"Invalid claim port binding on {cell.identifier.name}"
                         ) from error
-                    if len(cell_port.bits) != 1:
+                    if len(cell_port.bits) != len(binding.targets):
                         raise MaterializationError(
                             f"Claim formal {cell.identifier.name}.{binding.formal} "
-                            f"has width {len(cell_port.bits)}"
+                            f"has width {len(cell_port.bits)}, expected "
+                            f"{len(binding.targets)}"
                         )
-                    source = cell_port.bits[0]
-                    if isinstance(source, SnapshotBitRef):
-                        signal_to_local[signal(path, source)].append(local_key)
-                    else:
-                        local_constants[local_key].add(
-                            MaterialConstantRef(source.value.value)
-                        )
+                    for target, source in zip(
+                        binding.targets,
+                        cell_port.bits,
+                        strict=True,
+                    ):
+                        try:
+                            local_key = external_to_local[target]
+                        except KeyError as error:
+                            raise MaterializationError(
+                                f"Invalid claim port binding on "
+                                f"{cell.identifier.name}"
+                            ) from error
+                        if isinstance(source, SnapshotBitRef):
+                            signal_to_local[signal(path, source)].append(local_key)
+                        else:
+                            local_constants[local_key].add(
+                                MaterialConstantRef(source.value.value)
+                            )
                 implementation_drafts.append(
                     _ImplementationDraft(
                         path=f"{path}/implementation:{occurrence.value}",
@@ -477,12 +552,13 @@ def materialize_hierarchy(
                         packaging=claim.packaging,
                         ports=[
                             (
-                                binding.target.port,
-                                binding.target.bit,
+                                target.port,
+                                target.bit,
                                 binding.direction,
-                                external_to_local[binding.target],
+                                external_to_local[target],
                             )
                             for binding in claim.ports
+                            for target in binding.targets
                         ],
                         objects=list(role_to_object.values()),
                     )
@@ -590,7 +666,14 @@ def materialize_hierarchy(
                 f"Material network joins incompatible types {network_types!r}"
             )
         network_type = next(iter(network_types))
-        attachments: set[MaterialAttachment] = set(root_ports[local_root])
+        attachments: set[MaterialAttachment] = set(
+            _module_boundary_attachments(
+                network_type,
+                root_ports[local_root],
+                snapshot,
+                providers,
+            )
+        )
         for local_key in local_keys:
             attachments.update(local_attachments[local_key])
             attachments.update(local_constants[local_key])

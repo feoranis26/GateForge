@@ -3,6 +3,7 @@ import unittest
 
 from gateforge.gateforge import compile_material, design_preprocess
 from gateforge.graph import MaterialGraph, ObjectSubject
+from gateforge.claims import accept_mapping_proposals
 from gateforge.mapping import Mapper
 from gateforge.placement import TopologicalPlacer
 from gateforge.pipeline import default_mapping_stages
@@ -25,7 +26,8 @@ from gateforge.providers.lbp.registers import (
 from gateforge.providers.lbp.types import LBPStorageSelectorType, decode_lbp_object_type
 from gateforge.providers.lbp.types import LBPCounterType
 from gateforge.source import YosysParameterValue
-from gateforge.source import DesignSnapshot
+from gateforge.source import DesignSnapshot, SnapshotBitRef
+from gateforge.state import CompilationIntermediateState
 from gateforge.target import ObjectPortRef
 
 
@@ -90,6 +92,45 @@ class RegisterMappingTests(unittest.TestCase):
             },
         )
         validate_lbp_prefab(proposal.prefab, LBPTypeRegistry())
+
+    def test_claim_replacement_preserves_vector_bit_order(self) -> None:
+        context = design_preprocess(str(FIXTURE))
+        for stage in default_mapping_stages()[:3]:
+            for command in stage.passes:
+                context.run_pass(command)
+        proposal = Mapper([LBPCoarseRegisterBankMapper()]).collect_proposals(
+            context.snapshot(),
+            "post-fsm",
+        )[0]
+        expected = {
+            binding.target.bit: binding.source
+            for binding in proposal.boundary
+            if binding.target.port == "D"
+        }
+
+        state = accept_mapping_proposals(
+            context,
+            CompilationIntermediateState.empty(context.revision),
+            [proposal],
+            {"lbp": make_lbp_provider()},
+        )
+
+        claim = next(iter(state.claims.values()))
+        binding = next(
+            item for item in claim.ports if item.targets[0].port == "D"
+        )
+        replacement = context.snapshot().module(claim.module).cells[claim.instance]
+        actual = replacement.ports[binding.formal].bits
+        self.assertEqual(tuple(target.bit for target in binding.targets), tuple(range(9)))
+        self.assertTrue(all(isinstance(bit, SnapshotBitRef) for bit in actual))
+        self.assertEqual(
+            tuple(bit.bit_id for bit in actual if isinstance(bit, SnapshotBitRef)),
+            tuple(
+                source.bit_id
+                for source in (expected[bit] for bit in range(9))
+                if isinstance(source, SnapshotBitRef)
+            ),
+        )
 
     def test_stateful_design_materializes_one_generated_bank(self) -> None:
         _, _, material = compile_material(str(FIXTURE))

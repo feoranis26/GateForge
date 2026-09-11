@@ -12,6 +12,7 @@ from gateforge.artifacts import write_json
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "single_not.v"
+FACTORIO_FIXTURE = Path(__file__).parent / "fixtures" / "factorio" / "add32.v"
 
 
 class CompilationSessionTests(unittest.TestCase):
@@ -65,6 +66,48 @@ class CompilationSessionTests(unittest.TestCase):
         self.assertIsNotNone(snapshot.placement)
         self.assertIsNotNone(snapshot.visualization)
         json.dumps(snapshot.canonical_data(), allow_nan=False)
+
+    def test_rebuilds_provider_visualization_after_realization(self) -> None:
+        session = CompilationSession(FACTORIO_FIXTURE, target="factorio")
+        session.run_to_material()
+        session.place()
+        initial = session.build_visual_document()
+
+        rebuilt = session.build_visual_document(
+            provider_options={"factorio": {"output_lamps": True}}
+        )
+
+        self.assertEqual(session.phase, CompilationSessionPhase.REALIZED)
+        self.assertNotEqual(initial.canonical_data(), rebuilt.canonical_data())
+
+    def test_factorio_session_uses_backend_mapping_and_placement_defaults(self) -> None:
+        session = CompilationSession(FACTORIO_FIXTURE, target="factorio")
+
+        loaded = session.snapshot()
+        loaded_data = loaded.canonical_data()
+        self.assertEqual(session.target, "factorio")
+        self.assertEqual(loaded.target, "factorio")
+        self.assertEqual(loaded_data["schema_version"], 2)
+        self.assertEqual(
+            loaded_data["placement_defaults"],
+            {
+                "column_pitch": 6.0,
+                "row_pitch": 3.0,
+                "routing_group_height": 8.0,
+                "routing_gap_rows": 1,
+            },
+        )
+
+        material = session.run_to_material()
+        placement = session.place()
+
+        self.assertEqual(len(material.objects), 1)
+        self.assertEqual(placement.target, "factorio")
+        options = placement.provenance.options.canonical_data()
+        self.assertEqual(options["column_pitch"], 6.0)
+        self.assertEqual(options["row_pitch"], 3.0)
+        self.assertEqual(options["routing_group_height"], 8.0)
+        self.assertEqual(options["routing_gap_rows"], 1)
 
     def test_rejects_actions_outside_the_current_phase(self) -> None:
         session = CompilationSession(FIXTURE)

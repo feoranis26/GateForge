@@ -118,11 +118,16 @@ class WorkerClient:
         self.stop()
         return self.start()
 
-    def open_session(self, source: str | Path) -> WorkerEvent:
+    def open_session(
+        self,
+        source: str | Path,
+        *,
+        target: str = "lbp",
+    ) -> WorkerEvent:
         self.restart()
         return self.request(
             WorkerCommand.OPEN_SESSION,
-            {"source": str(Path(source).resolve())},
+            {"source": str(Path(source).resolve()), "target": target},
         )
 
     def submit(
@@ -268,9 +273,10 @@ def _worker_main(connection: Connection) -> None:
             should_exit = request.command == WorkerCommand.SHUTDOWN
             try:
                 if request.command == WorkerCommand.OPEN_SESSION:
-                    _require_payload(request, {"source"})
+                    _require_payload(request, {"source", "target"})
                     source = _payload_string(request, "source")
-                    session = CompilationSession(source)
+                    target = _payload_string(request, "target")
+                    session = CompilationSession(source, target=target)
                     session_id = request.session_id
                     schematic_renderer.clear()
                     result = {"snapshot": session.snapshot().canonical_data()}
@@ -479,6 +485,57 @@ def _dispatch_session_command(
 
         saved_path = session.export(output_path, build)
         return {"format": "lbp-toolkit", "path": str(saved_path)}
+    if request.command == WorkerCommand.EXPORT_FACTORIO_BLUEPRINT:
+        from gateforge.providers.factorio.blueprint import build_factorio_blueprint
+        from gateforge.providers.factorio.routing import build_factorio_routed_design
+
+        _require_payload(
+            request,
+            {
+                "path",
+                "label",
+                "add_input_combinators",
+                "input_values",
+                "add_output_lamps",
+            },
+        )
+        output_path = _payload_string(request, "path")
+        label = _payload_optional_string(request, "label")
+        add_input_combinators = _payload_bool(
+            request, "add_input_combinators"
+        )
+        input_values = _payload_input_values(request, "input_values")
+        add_output_lamps = _payload_bool(request, "add_output_lamps")
+        if input_values and not add_input_combinators:
+            raise _WorkerDispatchError(
+                "invalid-payload",
+                "Factorio input values require generated input combinators",
+            )
+        if session.target != "factorio":
+            raise _WorkerDispatchError(
+                "invalid-target",
+                "Factorio blueprint export requires a Factorio session",
+            )
+
+        def build(material, graph, placed, providers):
+            del providers
+            routed = build_factorio_routed_design(
+                material,
+                graph,
+                placed,
+                input_drivers=(
+                    "constant" if add_input_combinators else "none"
+                ),
+                input_values=input_values,
+                output_lamps=add_output_lamps,
+            )
+            return build_factorio_blueprint(
+                routed,
+                label=label,
+            ).canonical_data()
+
+        saved_path = session.export(output_path, build)
+        return {"format": "factorio-blueprint", "path": str(saved_path)}
     if request.command == WorkerCommand.SHUTDOWN:
         _require_payload(request, set())
         return {"stopped": True}
@@ -568,6 +625,41 @@ def _payload_int(request: WorkerRequest, name: str) -> int:
             f"{request.command.value} payload field {name!r} must be an integer",
         )
     return value
+
+
+def _payload_bool(request: WorkerRequest, name: str) -> bool:
+    value = request.payload[name]
+    if type(value) is not bool:
+        raise _WorkerDispatchError(
+            "invalid-payload",
+            f"{request.command.value} payload field {name!r} must be a boolean",
+        )
+    return value
+
+
+def _payload_input_values(
+    request: WorkerRequest,
+    name: str,
+) -> dict[str, str | int]:
+    values = _payload_object(request, name)
+    result: dict[str, str | int] = {}
+    for port, value in values.items():
+        if not port:
+            raise _WorkerDispatchError(
+                "invalid-payload",
+                "Factorio input-value port names must not be empty",
+            )
+        if isinstance(value, str) and value:
+            result[port] = value
+        elif isinstance(value, int) and not isinstance(value, bool):
+            result[port] = value
+        else:
+            raise _WorkerDispatchError(
+                "invalid-payload",
+                f"Factorio input value for {port!r} must be an integer or "
+                "non-empty string",
+            )
+    return result
 
 
 def _object_bool(value: dict[str, JsonValue], name: str) -> bool:

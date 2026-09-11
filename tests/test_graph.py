@@ -5,12 +5,14 @@ from gateforge.graph import (
     MaterialGraph,
     MaterialGraphError,
     ModulePortSubject,
+    ModuleValueSubject,
     ObjectSubject,
 )
 from gateforge.material import (
     MaterialConstantRef,
     MaterialDesign,
     MaterialModulePortRef,
+    MaterialModuleValueRef,
     MaterialNet,
     MaterialObject,
     MaterialObjectPortRef,
@@ -23,6 +25,7 @@ from gateforge.providers.lbp.common import LBP_PROVIDER, LBP_WIRE
 from gateforge.providers.lbp.objects import make_lbp_provider
 from gateforge.providers.lbp.types import LBPNotGateType
 from gateforge.target import (
+    NetworkInterfaceMode,
     NetworkTypeIdentifier,
     NetworkTypeSchema,
     ObjectTypeIdentifier,
@@ -87,9 +90,43 @@ def _lbp_inverter_design(constant_input: bool = False) -> MaterialDesign:
     )
 
 
-def _additive_provider(projector=None) -> TargetProvider:
+def _packed_additive_design() -> MaterialDesign:
+    gate = _material_object("gate", ADDITIVE_NODE, "c")
+    return MaterialDesign(
+        (gate,),
+        (
+            _material_net(
+                ADDITIVE_WIRE,
+                MaterialModuleValueRef(
+                    "test",
+                    "a",
+                    (0, 1, 2),
+                    PortDirection.INPUT,
+                ),
+                MaterialObjectPortRef(gate.identifier, "IN"),
+            ),
+            _material_net(
+                ADDITIVE_WIRE,
+                MaterialObjectPortRef(gate.identifier, "OUT"),
+                MaterialModuleValueRef(
+                    "test",
+                    "y",
+                    (0, 1, 2),
+                    PortDirection.OUTPUT,
+                ),
+            ),
+        ),
+    )
+
+
+def _additive_provider(
+    projector=None,
+    interface_mode: NetworkInterfaceMode = NetworkInterfaceMode.BITWISE,
+) -> TargetProvider:
     registry = TargetTypeRegistry()
-    registry.register_network(NetworkTypeSchema(ADDITIVE_WIRE, ADDITIVE_SIGNAL))
+    registry.register_network(
+        NetworkTypeSchema(ADDITIVE_WIRE, ADDITIVE_SIGNAL, interface_mode)
+    )
     registry.register_object(
         ObjectTypeSchema(
             ADDITIVE_NODE,
@@ -106,12 +143,24 @@ def _additive_provider(projector=None) -> TargetProvider:
         sources = [
             item
             for item in net.attachments
-            if isinstance(item, MaterialObjectPortRef) and item.port == "OUT"
+            if (
+                isinstance(item, MaterialObjectPortRef) and item.port == "OUT"
+            )
+            or (
+                isinstance(item, MaterialModuleValueRef)
+                and item.direction == PortDirection.INPUT
+            )
         ]
         targets = [
             item
             for item in net.attachments
-            if isinstance(item, MaterialObjectPortRef) and item.port == "IN"
+            if (
+                isinstance(item, MaterialObjectPortRef) and item.port == "IN"
+            )
+            or (
+                isinstance(item, MaterialModuleValueRef)
+                and item.direction == PortDirection.OUTPUT
+            )
         ]
         return tuple(
             ProjectedDependency(source, target)
@@ -159,6 +208,39 @@ class MaterialGraphTests(unittest.TestCase):
         constant = ConstantSubject(input_net.identifier, "1")
         self.assertIn(constant, graph.subjects)
         self.assertEqual(graph.incident_nets[constant], frozenset({input_net.identifier}))
+
+    def test_packed_module_value_is_one_graph_subject(self) -> None:
+        design = _packed_additive_design()
+        gate = design.objects[0]
+
+        graph = MaterialGraph.from_design(
+            design,
+            {
+                ADDITIVE_PROVIDER: _additive_provider(
+                    interface_mode=NetworkInterfaceMode.PACKED
+                )
+            },
+        )
+
+        gate_subject = ObjectSubject(gate.identifier)
+        source_subject = ModuleValueSubject(
+            "test",
+            "a",
+            (0, 1, 2),
+            PortDirection.INPUT,
+        )
+        sink_subject = ModuleValueSubject(
+            "test",
+            "y",
+            (0, 1, 2),
+            PortDirection.OUTPUT,
+        )
+        self.assertEqual(graph.predecessors[gate_subject], frozenset({source_subject}))
+        self.assertEqual(graph.successors[gate_subject], frozenset({sink_subject}))
+        self.assertEqual(
+            {subject for subject in graph.subjects if not isinstance(subject, ObjectSubject)},
+            {source_subject, sink_subject},
+        )
 
     def test_multiple_sources_are_provider_projected_not_core_rejected(self) -> None:
         left = _material_object("left", ADDITIVE_NODE, "c")

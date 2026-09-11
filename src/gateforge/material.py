@@ -9,6 +9,7 @@ import re
 from typing import TYPE_CHECKING
 
 from gateforge.target import (
+    NetworkInterfaceMode,
     NetworkTypeIdentifier,
     ObjectTypeIdentifier,
     ObjectTypeSchema,
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     from gateforge.provider import TargetProvider
 
 
-MATERIAL_SCHEMA_VERSION = 2
+MATERIAL_SCHEMA_VERSION = 3
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -77,12 +78,23 @@ class MaterialModulePortRef:
 
 
 @dataclass(frozen=True, slots=True)
+class MaterialModuleValueRef:
+    module: str
+    port: str
+    bits: tuple[int, ...]
+    direction: PortDirection
+
+
+@dataclass(frozen=True, slots=True)
 class MaterialConstantRef:
     value: str
 
 
 type MaterialAttachment = (
-    MaterialObjectPortRef | MaterialModulePortRef | MaterialConstantRef
+    MaterialObjectPortRef
+    | MaterialModulePortRef
+    | MaterialModuleValueRef
+    | MaterialConstantRef
 )
 
 
@@ -228,7 +240,7 @@ class MaterialDesign:
             "material design",
         )
         version = _require_int(data.get("schema_version"), "material schema version")
-        if version not in {1, MATERIAL_SCHEMA_VERSION}:
+        if version not in {1, 2, MATERIAL_SCHEMA_VERSION}:
             raise MaterialValidationError(
                 f"Unsupported material schema version {version}"
             )
@@ -299,7 +311,7 @@ class MaterialDesign:
             for raw_attachment in _require_list(
                 item.get("attachments"), "material net attachments"
             ):
-                attachment = _decode_attachment(raw_attachment)
+                attachment = _decode_attachment(raw_attachment, version)
                 if attachment in attachments:
                     raise MaterialValidationError(
                         f"Material net {identifier.value} has duplicate attachment "
@@ -595,6 +607,14 @@ def _material_attachment_data(
             "bit": attachment.bit,
             "direction": attachment.direction.value,
         }
+    if isinstance(attachment, MaterialModuleValueRef):
+        return {
+            "kind": "module_value",
+            "module": attachment.module,
+            "port": attachment.port,
+            "bits": list(attachment.bits),
+            "direction": attachment.direction.value,
+        }
     return {"kind": "constant", "value": attachment.value}
 
 
@@ -872,12 +892,43 @@ def validate_material_design(
                     )
                 _claim_endpoint(attachment, used_endpoints)
             elif isinstance(attachment, MaterialModulePortRef):
+                if network_schema.interface_mode != NetworkInterfaceMode.BITWISE:
+                    raise MaterialValidationError(
+                        f"Packed material net {net.identifier.value} requires "
+                        "module value attachments"
+                    )
                 if not attachment.module or not attachment.port or attachment.bit < 0:
                     raise MaterialValidationError(
                         f"Material net {net.identifier.value} has invalid module port "
                         f"{attachment}"
                     )
                 _claim_endpoint(attachment, used_endpoints)
+            elif isinstance(attachment, MaterialModuleValueRef):
+                if network_schema.interface_mode != NetworkInterfaceMode.PACKED:
+                    raise MaterialValidationError(
+                        f"Bitwise material net {net.identifier.value} cannot use "
+                        "a module value attachment"
+                    )
+                if (
+                    not attachment.module
+                    or not attachment.port
+                    or not attachment.bits
+                    or attachment.bits != tuple(range(len(attachment.bits)))
+                ):
+                    raise MaterialValidationError(
+                        f"Material net {net.identifier.value} has invalid module "
+                        f"value {attachment}"
+                    )
+                for bit in attachment.bits:
+                    _claim_endpoint(
+                        MaterialModulePortRef(
+                            attachment.module,
+                            attachment.port,
+                            bit,
+                            attachment.direction,
+                        ),
+                        used_endpoints,
+                    )
             elif isinstance(attachment, MaterialConstantRef):
                 if not attachment.value:
                     raise MaterialValidationError(
@@ -918,7 +969,7 @@ def _schema_port(
     return port
 
 
-def _decode_attachment(value: object) -> MaterialAttachment:
+def _decode_attachment(value: object, schema_version: int) -> MaterialAttachment:
     data = _require_mapping(value, "material attachment")
     kind = _require_nonempty_str(data.get("kind"), "material attachment kind")
     if kind == "object":
@@ -941,6 +992,31 @@ def _decode_attachment(value: object) -> MaterialAttachment:
             module=_require_nonempty_str(data.get("module"), "attachment module"),
             port=_require_nonempty_str(data.get("port"), "attachment module port"),
             bit=_require_nonnegative_int(data.get("bit"), "attachment module bit"),
+            direction=PortDirection(
+                _require_nonempty_str(data.get("direction"), "attachment direction")
+            ),
+        )
+    if kind == "module_value":
+        if schema_version < 3:
+            raise MaterialValidationError(
+                "Material module values require schema version 3"
+            )
+        _require_keys(
+            data,
+            {"kind", "module", "port", "bits", "direction"},
+            set(),
+            "module value attachment",
+        )
+        return MaterialModuleValueRef(
+            module=_require_nonempty_str(data.get("module"), "attachment module"),
+            port=_require_nonempty_str(data.get("port"), "attachment module port"),
+            bits=tuple(
+                _require_nonnegative_int(item, "attachment module value bit")
+                for item in _require_list(
+                    data.get("bits"),
+                    "attachment module value bits",
+                )
+            ),
             direction=PortDirection(
                 _require_nonempty_str(data.get("direction"), "attachment direction")
             ),

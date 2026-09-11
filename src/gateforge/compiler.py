@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pyosys import libyosys as ys
 
+from gateforge.backend import CompilationBackend
 from gateforge.design import DesignContext
 from gateforge.hierarchy import (
     SynthesisHierarchyPolicy,
@@ -28,6 +29,11 @@ from gateforge.providers.lbp.registers import (
     LBPRegisterStyle,
     LBPScalarRegisterBankMapper,
 )
+from gateforge.providers.factorio.common import FACTORIO_PROVIDER
+from gateforge.providers.factorio.mapping import FactorioAddMapper
+from gateforge.providers.factorio.intrinsics import FactorioLampIntrinsicMapper
+from gateforge.providers.factorio.objects import make_factorio_provider
+from gateforge.placement import TopologicalPlacementOptions
 from gateforge.search import (
     CompilationSearch,
     CompilationSearchSession,
@@ -49,20 +55,59 @@ class MaterialCompilationResult:
     report: MappingSearchReport
 
 
-def default_target_providers() -> dict[str, TargetProvider]:
-    return {LBP_PROVIDER: make_lbp_provider()}
+def compilation_backend(
+    target: str = LBP_PROVIDER,
+    register_style: LBPRegisterStyle = LBPRegisterStyle.COMPACT,
+) -> CompilationBackend:
+    if target == LBP_PROVIDER:
+        provider = make_lbp_provider()
+        return CompilationBackend(
+            identifier=LBP_PROVIDER,
+            target_providers={LBP_PROVIDER: provider},
+            mapping_providers=(
+                LBPIntrinsicMapper(),
+                LBPCoarseRegisterBankMapper(register_style),
+                LBPScalarRegisterBankMapper(register_style),
+                LBPAssociativeConeMapper(),
+                LBPCombinatorialLowLevelGateMapper(),
+            ),
+            placement_options=TopologicalPlacementOptions(),
+        )
+    if target == FACTORIO_PROVIDER:
+        provider = make_factorio_provider()
+        return CompilationBackend(
+            identifier=FACTORIO_PROVIDER,
+            target_providers={FACTORIO_PROVIDER: provider},
+            mapping_providers=(FactorioLampIntrinsicMapper(), FactorioAddMapper()),
+            placement_options=TopologicalPlacementOptions(
+                column_pitch=6.0,
+                row_pitch=3.0,
+                routing_group_height=8.0,
+                routing_gap_rows=1,
+            ),
+        )
+    raise ValueError(f"Unknown compilation target {target!r}")
+
+
+def all_target_providers() -> dict[str, TargetProvider]:
+    return {
+        target: compilation_backend(target).target_providers[target]
+        for target in (LBP_PROVIDER, FACTORIO_PROVIDER)
+    }
+
+
+def default_target_providers(
+    target: str = LBP_PROVIDER,
+) -> dict[str, TargetProvider]:
+    return dict(compilation_backend(target).target_providers)
 
 
 def default_mapping_providers(
     register_style: LBPRegisterStyle = LBPRegisterStyle.COMPACT,
+    *,
+    target: str = LBP_PROVIDER,
 ) -> tuple[MappingProvider, ...]:
-    return (
-        LBPIntrinsicMapper(),
-        LBPCoarseRegisterBankMapper(register_style),
-        LBPScalarRegisterBankMapper(register_style),
-        LBPAssociativeConeMapper(),
-        LBPCombinatorialLowLevelGateMapper(),
-    )
+    return compilation_backend(target, register_style).mapping_providers
 
 
 def design_preprocess(path: str) -> DesignContext:
@@ -110,15 +155,16 @@ def start_compilation_search(
     mapping_search: MappingSearchOptions = MappingSearchOptions(
         mode=MappingSearchMode.GREEDY
     ),
+    target: str = LBP_PROVIDER,
 ) -> CompilationSearchSession:
     resolved_stages = tuple(default_mapping_stages() if stages is None else stages)
     resolved_mapping_providers = (
-        default_mapping_providers()
+        default_mapping_providers(target=target)
         if mapping_providers is None
         else tuple(mapping_providers)
     )
     resolved_target_providers = (
-        default_target_providers()
+        default_target_providers(target)
         if target_providers is None
         else target_providers
     )
@@ -160,13 +206,18 @@ def compile_source(
     mapping_search: MappingSearchOptions = MappingSearchOptions(
         mode=MappingSearchMode.GREEDY
     ),
+    target: str = LBP_PROVIDER,
 ) -> tuple[DesignContext, CompilationIntermediateState]:
     resolved_stages = default_mapping_stages() if stages is None else stages
     resolved_mapping_providers = (
-        default_mapping_providers() if mapping_providers is None else mapping_providers
+        default_mapping_providers(target=target)
+        if mapping_providers is None
+        else mapping_providers
     )
     resolved_target_providers = (
-        default_target_providers() if target_providers is None else target_providers
+        default_target_providers(target)
+        if target_providers is None
+        else target_providers
     )
     result = search_source(
         path,
@@ -263,6 +314,7 @@ def compile_material(
     mapping_search: MappingSearchOptions = MappingSearchOptions(
         mode=MappingSearchMode.GREEDY
     ),
+    target: str = LBP_PROVIDER,
 ) -> tuple[DesignContext, CompilationIntermediateState, MaterialDesign]:
     compilation = compile_material_with_report(
         path,
@@ -271,6 +323,7 @@ def compile_material(
         target_providers=target_providers,
         synthesis_hierarchy=synthesis_hierarchy,
         mapping_search=mapping_search,
+        target=target,
     )
     return compilation[0], compilation[1], compilation[2]
 
@@ -285,6 +338,7 @@ def compile_material_with_report(
     mapping_search: MappingSearchOptions = MappingSearchOptions(
         mode=MappingSearchMode.GREEDY
     ),
+    target: str = LBP_PROVIDER,
 ) -> tuple[
     DesignContext,
     CompilationIntermediateState,
@@ -293,10 +347,14 @@ def compile_material_with_report(
 ]:
     resolved_stages = default_mapping_stages() if stages is None else stages
     resolved_mapping_providers = (
-        default_mapping_providers() if mapping_providers is None else mapping_providers
+        default_mapping_providers(target=target)
+        if mapping_providers is None
+        else mapping_providers
     )
     resolved_target_providers = (
-        default_target_providers() if target_providers is None else target_providers
+        default_target_providers(target)
+        if target_providers is None
+        else target_providers
     )
     result = search_source(
         path,

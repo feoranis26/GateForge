@@ -16,6 +16,7 @@ from gateforge.workbench.worker import (
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "single_not.v"
+FACTORIO_FIXTURE = Path(__file__).parent / "fixtures" / "factorio" / "add32.v"
 PLACEMENT_PAYLOAD = {
     "column_pitch": 315.0,
     "row_pitch": 63.0,
@@ -200,6 +201,86 @@ class WorkbenchWorkerTests(unittest.TestCase):
 
         self.assertTrue(finished.is_set())
         self.assertFalse(client.alive)
+
+    def test_open_session_transports_factorio_target_and_defaults(self) -> None:
+        client = WorkerClient(response_timeout=10.0)
+        self.addCleanup(client.stop)
+
+        opened = client.open_session(FACTORIO_FIXTURE, target="factorio")
+        snapshot = opened.payload["snapshot"]
+
+        self.assertEqual(snapshot["schema_version"], 2)
+        self.assertEqual(snapshot["target"], "factorio")
+        self.assertEqual(snapshot["placement_defaults"]["column_pitch"], 6.0)
+        client.request(WorkerCommand.RUN_TO_MATERIAL)
+        placed = client.request(
+            WorkerCommand.PLACE,
+            {
+                **PLACEMENT_PAYLOAD,
+                "column_pitch": 6.0,
+                "row_pitch": 3.0,
+                "routing_group_height": 8.0,
+                "routing_gap_rows": 1,
+            },
+        )
+        self.assertEqual(placed.payload["snapshot"]["target"], "factorio")
+
+    def test_worker_exports_factorio_blueprint_with_realization_options(self) -> None:
+        client = WorkerClient(response_timeout=10.0)
+        self.addCleanup(client.stop)
+        client.open_session(FACTORIO_FIXTURE, target="factorio")
+        client.request(WorkerCommand.RUN_TO_MATERIAL)
+        client.request(
+            WorkerCommand.PLACE,
+            {
+                **PLACEMENT_PAYLOAD,
+                "column_pitch": 6.0,
+                "row_pitch": 3.0,
+                "routing_group_height": 8.0,
+                "routing_gap_rows": 1,
+            },
+        )
+
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "blueprint.json"
+            event = client.request(
+                WorkerCommand.EXPORT_FACTORIO_BLUEPRINT,
+                {
+                    "path": str(output),
+                    "label": "Worker add32",
+                    "add_input_combinators": True,
+                    "input_values": {"a": "0xffffffff", "b": 2},
+                    "add_output_lamps": True,
+                },
+            )
+
+            self.assertEqual(event.payload["format"], "factorio-blueprint")
+            self.assertEqual(event.payload["path"], str(output.resolve()))
+            blueprint = json.loads(output.read_text(encoding="utf-8"))["blueprint"]
+            self.assertEqual(blueprint["label"], "Worker add32")
+            self.assertEqual(
+                [item["name"] for item in blueprint["entities"]].count("small-lamp"),
+                1,
+            )
+
+    def test_worker_rejects_invalid_factorio_export_options(self) -> None:
+        client = WorkerClient(response_timeout=10.0)
+        self.addCleanup(client.stop)
+        client.open_session(FACTORIO_FIXTURE, target="factorio")
+
+        with self.assertRaises(WorkerCommandError) as caught:
+            client.request(
+                WorkerCommand.EXPORT_FACTORIO_BLUEPRINT,
+                {
+                    "path": "/tmp/unused.json",
+                    "label": None,
+                    "add_input_combinators": "yes",
+                    "input_values": {},
+                    "add_output_lamps": False,
+                },
+            )
+
+        self.assertEqual(caught.exception.code, "invalid-payload")
 
 
 if __name__ == "__main__":

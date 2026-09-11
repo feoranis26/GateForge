@@ -10,6 +10,7 @@ from pathlib import Path
 from gateforge.artifacts import write_json
 from gateforge.compiler import (
     MaterialCompilationResult,
+    compilation_backend,
     default_mapping_providers,
     default_target_providers,
     materialize_search_result,
@@ -373,6 +374,8 @@ class TerminalScoreSummary:
 
 @dataclass(frozen=True, slots=True)
 class SessionSnapshot:
+    target: str
+    placement_defaults: TopologicalPlacementOptions
     phase: CompilationSessionPhase
     source: str
     stage_index: int
@@ -388,7 +391,14 @@ class SessionSnapshot:
 
     def canonical_data(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
+            "target": self.target,
+            "placement_defaults": {
+                "column_pitch": self.placement_defaults.column_pitch,
+                "row_pitch": self.placement_defaults.row_pitch,
+                "routing_group_height": self.placement_defaults.routing_group_height,
+                "routing_gap_rows": self.placement_defaults.routing_gap_rows,
+            },
             "phase": self.phase.value,
             "source": self.source,
             "stage_index": self.stage_index,
@@ -428,20 +438,24 @@ class CompilationSession:
         mapping_search: MappingSearchOptions = MappingSearchOptions(
             mode=MappingSearchMode.GREEDY
         ),
+        target: str = "lbp",
     ) -> None:
         self.source = Path(source).resolve()
         self.source_text = self.source.read_text(encoding="utf-8")
         self.stages = tuple(default_mapping_stages() if stages is None else stages)
+        backend = compilation_backend(target)
+        self.target = backend.identifier
         self.mapping_providers = tuple(
-            default_mapping_providers()
+            backend.mapping_providers
             if mapping_providers is None
             else mapping_providers
         )
         self.target_providers = dict(
-            default_target_providers()
+            backend.target_providers
             if target_providers is None
             else target_providers
         )
+        self.default_placement_options = backend.placement_options
         self.synthesis_hierarchy = synthesis_hierarchy
         self.mapping_search = mapping_search
         self.phase = CompilationSessionPhase.SOURCE_LOADED
@@ -560,7 +574,7 @@ class CompilationSession:
     def place(
         self,
         *,
-        options: TopologicalPlacementOptions = TopologicalPlacementOptions(),
+        options: TopologicalPlacementOptions | None = None,
         physical_hierarchy: PhysicalHierarchyPolicy = PhysicalHierarchyPolicy(),
         generated_hierarchy: GeneratedHierarchyPolicy = GeneratedHierarchyPolicy(),
         placer: Placer | None = None,
@@ -569,7 +583,7 @@ class CompilationSession:
         if self._graph is None:
             raise AssertionError("Materialized compilation session has no graph")
         resolved_placer = placer or TopologicalPlacer(
-            options,
+            self.default_placement_options if options is None else options,
             providers=self.target_providers,
             physical_hierarchy=physical_hierarchy,
             generated_hierarchy=generated_hierarchy,
@@ -583,7 +597,10 @@ class CompilationSession:
         *,
         provider_options: Mapping[str, Mapping[str, object]] | None = None,
     ) -> VisualDocument:
-        self._require_phase(CompilationSessionPhase.PLACED)
+        self._require_phase(
+            CompilationSessionPhase.PLACED,
+            CompilationSessionPhase.REALIZED,
+        )
         if self._compilation is None or self._graph is None or self._placement is None:
             raise AssertionError("Placed compilation session is missing artifacts")
         self._visualization = build_provider_visual_document(
@@ -694,6 +711,8 @@ class CompilationSession:
         )
         report = None if self._compilation is None else self._compilation.report
         return SessionSnapshot(
+            target=self.target,
+            placement_defaults=self.default_placement_options,
             phase=self.phase,
             source=str(self.source),
             stage_index=stage_index,
